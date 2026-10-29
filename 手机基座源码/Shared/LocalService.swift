@@ -80,28 +80,14 @@ final class LocalService {
         listener.newConnectionHandler = { [weak self] conn in
             self?.queue.async { self?.accept(conn) }
         }
-        let gate = DispatchSemaphore(value: 0)
-        var startError: Error?
+        // Do NOT semaphore-wait on the caller thread (often MainActor): blocking the
+        // main run loop while NWListener comes up can wedge HTTP accepts forever.
         listener.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                gate.signal()
-            case .failed(let err):
-                startError = err
-                gate.signal()
-            default:
-                break
+            if case .failed(let err) = state {
+                NSLog("[LocalService] listener failed: %@", String(describing: err))
             }
         }
         listener.start(queue: queue)
-        if gate.wait(timeout: .now() + 3) == .timedOut {
-            listener.cancel()
-            throw NSError(domain: "LocalService", code: 1, userInfo: [NSLocalizedDescriptionKey: "监听 \(info.port) 超时"])
-        }
-        if let startError {
-            listener.cancel()
-            throw startError
-        }
         self.listener = listener
 
         let txt: [String: Data] = [
