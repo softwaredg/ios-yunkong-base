@@ -10,6 +10,8 @@ NS_ASSUME_NONNULL_BEGIN
 + (instancetype)shared;
 - (BOOL)isAvailable;
 - (void)startWithHandler:(void (^)(CVPixelBufferRef pixelBuffer, uint64_t ptsUs))handler;
+/// Fired once when several consecutive renders look empty (black) — caller should fall back.
+- (void)setBlankHandler:(void (^ _Nullable)(void))handler;
 - (void)stop;
 - (void)setPreferredFPS:(NSInteger)fps;
 
