@@ -1,6 +1,7 @@
 #!/bin/bash
-# Pack unsigned .app → tipa. Version patch auto-increments (+1) unless
-# VERSION is set with BUMP=0. Removes older 云控 tipa packages in OUT_DIR.
+# Pack unsigned .app → tipa. Uses 手机基座源码/VERSION (already bumped by bump-version.sh).
+# Stamps CFBundleShortVersionString into Info.plist so UI matches the tipa filename.
+# Removes older 云控 tipa packages in OUT_DIR.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REPO="$(cd "$ROOT/.." && pwd)"
@@ -12,35 +13,10 @@ PRODUCTS="$DERIVED/Build/Products/Release-iphoneos"
 APP="$PRODUCTS/${APP_NAME}.app"
 PREFIX="IOS云控基座-TVH4-IOHID"
 
-bump_patch() {
-  local cur="$1"
-  local major minor patch
-  IFS=. read -r major minor patch <<<"$cur"
-  major="${major:-0}"
-  minor="${minor:-0}"
-  patch="${patch:-0}"
-  patch=$((patch + 1))
-  echo "${major}.${minor}.${patch}"
-}
-
-# Resolve version: BUMP=0 + VERSION → use as-is; else bump VERSION file (default 0.2.1).
-if [[ -n "${VERSION:-}" && "${BUMP:-1}" == "0" ]]; then
-  NEW_VERSION="$VERSION"
-else
-  CUR="$(tr -d '[:space:]' <"$VERSION_FILE" 2>/dev/null || true)"
-  [[ -z "$CUR" ]] && CUR="0.2.1"
-  if [[ -n "${VERSION:-}" ]]; then
-    NEW_VERSION="$VERSION"
-  else
-    NEW_VERSION="$(bump_patch "$CUR")"
-  fi
-fi
-echo "$NEW_VERSION" >"$VERSION_FILE"
-VERSION="$NEW_VERSION"
-# Keep Xcode marketing version in sync when project.yml is present.
-if [[ -f "$ROOT/project.yml" ]]; then
-  sed -i.bak -E "s/(MARKETING_VERSION: )\"[0-9.]+\"/\1\"${VERSION}\"/" "$ROOT/project.yml" || true
-  rm -f "$ROOT/project.yml.bak"
+VERSION="$(tr -d '[:space:]' <"$VERSION_FILE" 2>/dev/null || true)"
+if [[ -z "$VERSION" ]]; then
+  echo "error: missing $VERSION_FILE — run scripts/bump-version.sh first" >&2
+  exit 1
 fi
 
 mkdir -p "$OUT_DIR"
@@ -59,6 +35,21 @@ cp -R "$APP" "$STAGE/Payload/"
 APP_IN_STAGE="$STAGE/Payload/${APP_NAME}.app"
 rm -rf "$APP_IN_STAGE/_CodeSignature" || true
 rm -f "$APP_IN_STAGE/embedded.mobileprovision" || true
+
+# Force marketing version inside the tipa (guards against build/pack ordering bugs).
+PLIST="$APP_IN_STAGE/Info.plist"
+if [[ -f "$PLIST" ]]; then
+  if command -v /usr/libexec/PlistBuddy >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$PLIST" 2>/dev/null \
+      || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string ${VERSION}" "$PLIST"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "$PLIST" 2>/dev/null \
+      || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string ${VERSION}" "$PLIST" || true
+  elif command -v plutil >/dev/null 2>&1; then
+    plutil -replace CFBundleShortVersionString -string "$VERSION" "$PLIST"
+    plutil -replace CFBundleVersion -string "$VERSION" "$PLIST" || true
+  fi
+  echo "stamped Info.plist CFBundleShortVersionString=${VERSION}"
+fi
 
 if command -v ldid >/dev/null 2>&1; then
   ldid -S"$ROOT/App/App.entitlements" "$APP_IN_STAGE/${APP_NAME}"
@@ -93,7 +84,6 @@ for d in "$OUT_DIR"/tipa-*; do
 done
 shopt -u nullglob
 
-# Expose for CI (GITHUB_OUTPUT / callers).
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   echo "version=${VERSION}" >>"$GITHUB_OUTPUT"
   echo "tipa=${TIPA}" >>"$GITHUB_OUTPUT"
