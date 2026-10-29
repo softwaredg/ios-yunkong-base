@@ -1,0 +1,5 @@
+Vendored IOHID injector only.
+Upstream file source: https://github.com/OwnGoalStudio/TrollVNC (GPL-2.0)
+  STHIDEventGenerator.{h,mm}, IOKitSPI.h, UIScreen+Private.h
+Local stubs: Control.h, Logging.h, IOHIDStubs.m
+Not vendored: any remote-desktop / RFB server binary or protocol.
