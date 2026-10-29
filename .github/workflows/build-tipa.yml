@@ -24,6 +24,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Bump version
+        id: ver
+        run: |
+          set -euo pipefail
+          chmod +x 手机基座源码/scripts/bump-version.sh
+          INPUT="${{ github.event.inputs.version }}"
+          if [[ -n "${INPUT}" ]]; then
+            export VERSION="$INPUT"
+            export BUMP=0
+          else
+            unset VERSION || true
+            export BUMP=1
+          fi
+          手机基座源码/scripts/bump-version.sh
+          echo "bumped to $(tr -d '[:space:]' < 手机基座源码/VERSION)"
+
       - name: Install tools
         run: brew install xcodegen ldid
 
@@ -61,28 +77,20 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x 手机基座源码/scripts/pack-tipa.sh
-          INPUT="${{ github.event.inputs.version }}"
-          if [[ -n "${INPUT}" ]]; then
-            export VERSION="$INPUT"
-            export BUMP=0
-          else
-            unset VERSION || true
-            export BUMP=1
-          fi
           手机基座源码/scripts/pack-tipa.sh "${{ github.workspace }}/手机基座"
           echo "packed $(tr -d '[:space:]' < 手机基座源码/VERSION)"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: IOSYunKongBase-${{ steps.pack.outputs.version }}-tipa
+          name: IOSYunKongBase-${{ steps.ver.outputs.version }}-tipa
           path: 手机基座/*.tipa
           if-no-files-found: error
 
       - name: Commit version bump
         run: |
           set -euo pipefail
-          V="${{ steps.pack.outputs.version }}"
+          V="${{ steps.ver.outputs.version }}"
           git add 手机基座源码/VERSION 手机基座源码/project.yml || true
           if git diff --cached --quiet; then
             echo "no version file changes"
@@ -96,7 +104,7 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.pack.outputs.version }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
           TAG="tipa-v${VERSION}"
