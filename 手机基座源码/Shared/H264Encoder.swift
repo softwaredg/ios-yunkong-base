@@ -69,8 +69,6 @@ final class H264Encoder {
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: targetFps as CFNumber)
         let dur = max(1, targetFps * 2) as CFNumber
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: dur)
-        let sourceOut: Int32 = 2
-        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: sourceOut as CFNumber)
         VTCompressionSessionPrepareToEncodeFrames(sess)
     }
 

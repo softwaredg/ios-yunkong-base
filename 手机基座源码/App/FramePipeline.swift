@@ -64,11 +64,10 @@ final class FramePipeline: @unchecked Sendable {
             encoder.configure(fps: 30, bitrateBps: 4_000_000)
         }
         frameCount = n + 1
-        let force = (n % 30) == 0
+        // Rely on VT MaxKeyFrameInterval — forcing every 30th capture caused encode stalls.
         lock.unlock()
         svc?.updateGeometry(width: w, height: h)
-        // Encoder copies/scales on its own queue (session created lazily at encode size).
-        encoder.encode(pixelBuffer: pb, ptsUs: ptsUs, forceKeyframe: force)
+        encoder.encode(pixelBuffer: pb, ptsUs: ptsUs, forceKeyframe: false)
     }
 
     var encodedFrameCount: UInt64 {

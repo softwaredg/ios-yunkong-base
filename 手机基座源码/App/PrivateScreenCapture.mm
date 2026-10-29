@@ -3,6 +3,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Accelerate/Accelerate.h>
+#import <os/lock.h>
 #import <dlfcn.h>
 #import <string.h>
 
@@ -47,6 +48,7 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     int _surfaceIdx;
     CVPixelBufferRef _pendingScale;
     BOOL _scaleBusy;
+    os_unfair_lock _scaleLock;
     OSType _pixelFormat;
     void (^_handler)(CVPixelBufferRef, uint64_t);
     void (^_blankHandler)(void);
@@ -98,6 +100,7 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     _blankNotified = NO;
     _lastDirty = -1;
     _haveDirty = NO;
+    _scaleLock = OS_UNFAIR_LOCK_INIT;
     _mode = PSCRenderModeByValueLCD;
     _pixelFormat = kFourCC_BGRA;
     [self resolveSymbols];
@@ -180,11 +183,13 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
         }
     }
     _surfaceIdx = 0;
+    os_unfair_lock_lock(&_scaleLock);
     if (_pendingScale) {
         CVPixelBufferRelease(_pendingScale);
         _pendingScale = NULL;
     }
     _scaleBusy = NO;
+    os_unfair_lock_unlock(&_scaleLock);
 }
 
 - (BOOL)ensureSurface {
@@ -332,7 +337,59 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     return ok;
 }
 
-/// Detach + downscale in one vImage pass (native CARender surface stays free for next tick).
+- (BOOL)interfaceIsLandscape {
+    CGSize b = UIScreen.mainScreen.bounds.size;
+    if (b.width > b.height) return YES;
+    UIInterfaceOrientation o = UIInterfaceOrientationPortrait;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        o = ((UIWindowScene *)scene).interfaceOrientation;
+        break;
+    }
+    return UIInterfaceOrientationIsLandscape(o);
+}
+
+- (CVPixelBufferRef)rotate90:(CVPixelBufferRef)src clockwise:(BOOL)cw {
+    size_t sw = CVPixelBufferGetWidth(src);
+    size_t sh = CVPixelBufferGetHeight(src);
+    int dw = (int)sh;
+    int dh = (int)sw;
+    NSDictionary *attrs = @{ (id)kCVPixelBufferIOSurfacePropertiesKey : @{} };
+    CVPixelBufferRef dst = NULL;
+    if (CVPixelBufferCreate(kCFAllocatorDefault, dw, dh, kCVPixelFormatType_32BGRA,
+                            (__bridge CFDictionaryRef)attrs, &dst) != kCVReturnSuccess || !dst) {
+        return NULL;
+    }
+    if (CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) {
+        CVPixelBufferRelease(dst);
+        return NULL;
+    }
+    if (CVPixelBufferLockBaseAddress(dst, 0) != kCVReturnSuccess) {
+        CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+        CVPixelBufferRelease(dst);
+        return NULL;
+    }
+    vImage_Buffer sbuf = {
+        .data = CVPixelBufferGetBaseAddress(src), .height = (vImagePixelCount)sh,
+        .width = (vImagePixelCount)sw, .rowBytes = CVPixelBufferGetBytesPerRow(src)
+    };
+    vImage_Buffer dbuf = {
+        .data = CVPixelBufferGetBaseAddress(dst), .height = (vImagePixelCount)dh,
+        .width = (vImagePixelCount)dw, .rowBytes = CVPixelBufferGetBytesPerRow(dst)
+    };
+    Pixel_8888 bg = {0, 0, 0, 0};
+    uint8_t rot = cw ? kRotate90DegreesClockwise : kRotate270DegreesClockwise;
+    vImage_Error err = vImageRotate90_ARGB8888(&sbuf, &dbuf, NULL, rot, bg, kvImageNoFlags);
+    CVPixelBufferUnlockBaseAddress(dst, 0);
+    CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+    if (err != kvImageNoError) {
+        CVPixelBufferRelease(dst);
+        return NULL;
+    }
+    return dst;
+}
+
+/// Detach + downscale (+ landscape upright rotate) in one pass off the tick queue.
 - (CVPixelBufferRef)copyDetachedBGRA:(CVPixelBufferRef)src {
     static const int kMaxSide = 720;
     size_t sw = CVPixelBufferGetWidth(src);
@@ -393,6 +450,20 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     }
     CVPixelBufferUnlockBaseAddress(dst, 0);
     CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+
+    // CARender buffer is device-native portrait; rotate so landscape UI is upright on PC.
+    if ([self interfaceIsLandscape]) {
+        UIInterfaceOrientation o = UIInterfaceOrientationLandscapeRight;
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            o = ((UIWindowScene *)scene).interfaceOrientation;
+            break;
+        }
+        BOOL cw = (o != UIInterfaceOrientationLandscapeLeft);
+        CVPixelBufferRef rotated = [self rotate90:dst clockwise:cw];
+        CVPixelBufferRelease(dst);
+        return rotated;
+    }
     return dst;
 }
 
@@ -446,19 +517,21 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
 }
 
 - (void)enqueueScale:(CVPixelBufferRef)wrapped {
-    // Latest-wins on scale queue (Create +1 transferred here).
+    // Latest-wins via lock — never dispatch_sync back onto the CARender tick queue.
+    os_unfair_lock_lock(&_scaleLock);
     if (_pendingScale) CVPixelBufferRelease(_pendingScale);
     _pendingScale = wrapped;
-    if (_scaleBusy) return;
-    _scaleBusy = YES;
+    BOOL start = !_scaleBusy;
+    if (start) _scaleBusy = YES;
+    os_unfair_lock_unlock(&_scaleLock);
+    if (!start) return;
     dispatch_async(_scaleQueue, ^{
         while (YES) {
-            __block CVPixelBufferRef held = NULL;
-            dispatch_sync(self->_tickQueue, ^{
-                held = self->_pendingScale;
-                self->_pendingScale = NULL;
-                if (!held) self->_scaleBusy = NO;
-            });
+            os_unfair_lock_lock(&self->_scaleLock);
+            CVPixelBufferRef held = self->_pendingScale;
+            self->_pendingScale = NULL;
+            if (!held) self->_scaleBusy = NO;
+            os_unfair_lock_unlock(&self->_scaleLock);
             if (!held) return;
             CVPixelBufferRef detached = [self copyDetachedBGRA:held];
             CVPixelBufferRelease(held);
