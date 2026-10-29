@@ -21,7 +21,8 @@ typedef size_t (*IOSurfaceGetHeightFn)(IOSurfaceRef);
 typedef kern_return_t (*IOSurfaceLockFn)(IOSurfaceRef, uint32_t, uint32_t *);
 typedef kern_return_t (*IOSurfaceUnlockFn)(IOSurfaceRef, uint32_t, uint32_t *);
 /// Private UIKit full-screen shot (same family as jailbreak UICreateScreenImage).
-typedef UIImage *(*UICreateScreenUIImageFn)(void);
+/// CFTypeRef so Create-rule +1 can CFBridgingRelease under ARC (UIImage* typedef cannot).
+typedef CFTypeRef (*UICreateScreenUIImageFn)(void);
 
 // Apple fourcc 'BGRA' == 0x42475241 (same constant commercial VT paths feed into pools).
 static const OSType kFourCC_BGRA = 0x42475241;
@@ -383,8 +384,8 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
 
 - (BOOL)tryEmitUICreateScreen:(CADisplayLink *)link {
     if (!_uiCreateScreen) return NO;
-    // Create-rule API (+1). ARC does not auto-release — take ownership then ARC frees.
-    UIImage *shot = (__bridge_transfer UIImage *)_uiCreateScreen();
+    // Create-rule API (+1). ARC does not auto-release — CFBridgingRelease takes ownership.
+    UIImage *shot = CFBridgingRelease(_uiCreateScreen());
     if (!shot) return NO;
     CVPixelBufferRef fromUI = [self pixelBufferFromUIImage:shot];
     if (fromUI && [self bufferLooksReal:fromUI]) {
