@@ -228,17 +228,13 @@ final class AppRuntime: ObservableObject {
             }
         }
         capturer.onPixelBuffer = { [weak self] pb, ts in
-            // Capture callbacks may release the CVPixelBuffer as soon as this
-            // closure returns — must retain across any async hop, or encode empty.
-            CVPixelBufferRetain(pb)
-            if Thread.isMainThread {
-                defer { CVPixelBufferRelease(pb) }
-                self?.handleFrame(pb, ts: ts)
-            } else {
-                Task { @MainActor in
-                    defer { CVPixelBufferRelease(pb) }
-                    self?.handleFrame(pb, ts: ts)
-                }
+            // ObjC may CVPixelBufferRelease as soon as this closure returns.
+            // Swift CVPixelBufferRetain/Release are unavailable under ARC — use
+            // Unmanaged to keep the buffer alive across the MainActor hop.
+            let held = Unmanaged.passUnretained(pb).retain()
+            Task { @MainActor in
+                let buffer = held.takeRetainedValue()
+                self?.handleFrame(buffer, ts: ts)
             }
         }
         capturer.start()
