@@ -51,12 +51,13 @@ targets:
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"
           - "@executable_path/Frameworks"
+        # Prefer CODE_SIGN_ENTITLEMENTS over xcodegen `entitlements.path`
+        # (the latter rewrote App/App.entitlements to empty <dict/> on GHA).
+        CODE_SIGN_ENTITLEMENTS: signing/App.entitlements
     dependencies:
       - target: Broadcast
         embed: true
         codeSign: false
-    entitlements:
-      path: App/App.entitlements
     scheme:
       testTargets: []
 
