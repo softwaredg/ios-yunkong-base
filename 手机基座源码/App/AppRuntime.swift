@@ -249,12 +249,16 @@ final class AppRuntime: ObservableObject {
         }
         capturer.onPixelBuffer = { [weak self] pb, ts in
             // ObjC may CVPixelBufferRelease as soon as this closure returns.
-            // Swift CVPixelBufferRetain/Release are unavailable under ARC — use
-            // Unmanaged to keep the buffer alive across the MainActor hop.
             let held = Unmanaged.passUnretained(pb).retain()
-            Task { @MainActor in
+            // CADisplayLink is on main — encode sync on MainActor to cut latency.
+            if Thread.isMainThread {
                 let buffer = held.takeRetainedValue()
-                self?.handleFrame(buffer, ts: ts)
+                MainActor.assumeIsolated { self?.handleFrame(buffer, ts: ts) }
+            } else {
+                Task { @MainActor in
+                    let buffer = held.takeRetainedValue()
+                    self?.handleFrame(buffer, ts: ts)
+                }
             }
         }
         capturer.start()
@@ -262,18 +266,16 @@ final class AppRuntime: ObservableObject {
     }
 
     private func wireEncoder() {
+        // Push TVH4 off the encoder queue without waiting for MainActor (avoids one-frame stall).
+        let video = tcpVideo
         encoder.onParameterSets = { [weak self] sps, pps in
-            Task { @MainActor in
-                guard let self else { return }
-                self.service?.publishConfiguration(sps: sps, pps: pps)
-                self.tcpVideo.setConfiguration(TVH4.annexBConfig(sps: sps, pps: pps))
-            }
+            video.setConfiguration(TVH4.annexBConfig(sps: sps, pps: pps))
+            Task { @MainActor in self?.service?.publishConfiguration(sps: sps, pps: pps) }
         }
         encoder.onFrame = { [weak self] avcc, key, ts in
+            video.sendFrame(annexB: TVH4.avccToAnnexB(avcc), keyframe: key, ptsUs: ts)
             Task { @MainActor in
-                guard let self else { return }
-                self.service?.publishFrame(avcc: avcc, keyframe: key, timestampUs: ts)
-                self.tcpVideo.sendFrame(annexB: TVH4.avccToAnnexB(avcc), keyframe: key, ptsUs: ts)
+                self?.service?.publishFrame(avcc: avcc, keyframe: key, timestampUs: ts)
             }
         }
     }
