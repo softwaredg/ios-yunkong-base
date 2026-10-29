@@ -8,7 +8,9 @@ final class TcpVideoHub {
     private let queue = DispatchQueue(label: "cn.iosmirror.base.tvh4.tcp")
     private var listener: NWListener?
     private var clients: [ObjectIdentifier: NWConnection] = [:]
+    private var ready: Set<ObjectIdentifier> = []
     private var latestConfig: Data?
+    private var latestKeyframe: Data?
 
     func start(port: UInt16 = defaultPort) throws {
         stop()
@@ -28,6 +30,7 @@ final class TcpVideoHub {
         listener = nil
         for c in clients.values { c.cancel() }
         clients.removeAll()
+        ready.removeAll()
     }
 
     func setConfiguration(_ annexB: Data) {
@@ -39,28 +42,43 @@ final class TcpVideoHub {
     func sendFrame(annexB: Data, keyframe: Bool, ptsUs: UInt64) {
         var flags: UInt8 = 0
         if keyframe { flags |= TVH4.flagKey }
-        broadcast(TVH4.build(flags: flags, ptsUs: ptsUs, payload: annexB))
+        let pkt = TVH4.build(flags: flags, ptsUs: ptsUs, payload: annexB)
+        if keyframe { latestKeyframe = pkt }
+        broadcast(pkt)
     }
 
     private func accept(_ conn: NWConnection) {
         let id = ObjectIdentifier(conn)
         clients[id] = conn
         conn.stateUpdateHandler = { [weak self] state in
-            if case .failed = state { self?.drop(id, conn) }
-            if case .cancelled = state { self?.drop(id, conn) }
+            guard let self else { return }
+            self.queue.async {
+                switch state {
+                case .ready:
+                    self.ready.insert(id)
+                    // Must wait until .ready — early send is silently dropped on Network.framework.
+                    if let cfg = self.latestConfig {
+                        conn.send(content: cfg, completion: .contentProcessed { _ in })
+                    }
+                    if let key = self.latestKeyframe {
+                        conn.send(content: key, completion: .contentProcessed { _ in })
+                    }
+                    NSLog("[TVH4] client ready, config=%d key=%d", self.latestConfig == nil ? 0 : 1, self.latestKeyframe == nil ? 0 : 1)
+                case .failed, .cancelled:
+                    self.drop(id, conn)
+                default:
+                    break
+                }
+            }
         }
         conn.start(queue: queue)
-        if let latestConfig {
-            conn.send(content: latestConfig, completion: .contentProcessed { _ in })
-        }
-        // Keep reading so we notice peer close (ignore TVHC for now — agent may write encode prefs).
         receiveLoop(conn, id: id)
     }
 
     private func receiveLoop(_ conn: NWConnection, id: ObjectIdentifier) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] _, _, isComplete, error in
             if isComplete || error != nil {
-                self?.drop(id, conn)
+                self?.queue.async { self?.drop(id, conn) }
                 return
             }
             self?.receiveLoop(conn, id: id)
@@ -68,14 +86,16 @@ final class TcpVideoHub {
     }
 
     private func drop(_ id: ObjectIdentifier, _ conn: NWConnection) {
+        ready.remove(id)
         clients.removeValue(forKey: id)
         conn.cancel()
     }
 
     private func broadcast(_ data: Data) {
-        for (id, conn) in clients {
+        for id in ready {
+            guard let conn = clients[id] else { continue }
             conn.send(content: data, completion: .contentProcessed { [weak self] err in
-                if err != nil { self?.drop(id, conn) }
+                if err != nil { self?.queue.async { self?.drop(id, conn) } }
             })
         }
     }
