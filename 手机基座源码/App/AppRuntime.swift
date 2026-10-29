@@ -115,9 +115,14 @@ final class AppRuntime: ObservableObject {
         service?.stop()
         service = nil
         running = false
-        startService()
-        startCapture()
-        status = "已自动重启 · \(reason) · #\(restartCount)"
+        // Brief pause so :11019/:5909 can leave TIME_WAIT before rebind.
+        let n = restartCount
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            self.startService()
+            self.startCapture()
+            self.status = "已自动重启 · \(reason) · #\(n)"
+        }
     }
 
     func refreshLanIP() {
