@@ -150,17 +150,10 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
 }
 
 - (NSDictionary *)surfacePropertiesWithFormat:(OSType)fmt {
+    // Must be native pixels — smaller IOSurface makes CARender tear (red/blue split).
     CGSize px = UIScreen.mainScreen.nativeBounds.size;
     int width = (int)round(MAX(px.width, 2));
     int height = (int)round(MAX(px.height, 2));
-    // CARender into native 750×1334 was ~3fps; match encoder cap so render+copy stay light.
-    static const int kMaxSide = 720;
-    int longEdge = MAX(width, height);
-    if (longEdge > kMaxSide) {
-        float s = (float)kMaxSide / (float)longEdge;
-        width = MAX(2, ((int)(width * s) / 2) * 2);
-        height = MAX(2, ((int)(height * s) / 2) * 2);
-    }
     int bytesPerElement = 4;
     size_t bytesPerRow = (size_t)bytesPerElement * (size_t)width;
     return @{
@@ -316,17 +309,20 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     return ok;
 }
 
-/// Detached BGRA copy so the shared IOSurface can be rendered again immediately (commercial pool pattern).
+/// Detach + downscale in one vImage pass (native CARender surface stays free for next tick).
 - (CVPixelBufferRef)copyDetachedBGRA:(CVPixelBufferRef)src {
-    size_t w = CVPixelBufferGetWidth(src);
-    size_t h = CVPixelBufferGetHeight(src);
+    static const int kMaxSide = 720;
+    size_t sw = CVPixelBufferGetWidth(src);
+    size_t sh = CVPixelBufferGetHeight(src);
+    size_t longEdge = MAX(sw, sh);
+    float scale = longEdge > (size_t)kMaxSide ? (float)kMaxSide / (float)longEdge : 1.f;
+    int dw = (int)MAX(2, ((int)(sw * scale) / 2) * 2);
+    int dh = (int)MAX(2, ((int)(sh * scale) / 2) * 2);
     NSDictionary *attrs = @{
         (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
-        (id)kCVPixelBufferCGImageCompatibilityKey : @YES,
-        (id)kCVPixelBufferCGBitmapContextCompatibilityKey : @YES,
     };
     CVPixelBufferRef dst = NULL;
-    if (CVPixelBufferCreate(kCFAllocatorDefault, (int)w, (int)h, kCVPixelFormatType_32BGRA,
+    if (CVPixelBufferCreate(kCFAllocatorDefault, dw, dh, kCVPixelFormatType_32BGRA,
                             (__bridge CFDictionaryRef)attrs, &dst) != kCVReturnSuccess || !dst) {
         return NULL;
     }
@@ -343,10 +339,33 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     uint8_t *dBase = (uint8_t *)CVPixelBufferGetBaseAddress(dst);
     size_t sStride = CVPixelBufferGetBytesPerRow(src);
     size_t dStride = CVPixelBufferGetBytesPerRow(dst);
-    size_t rowBytes = MIN(sStride, dStride);
-    if (sBase && dBase) {
-        for (size_t y = 0; y < h; y++) {
+    if (!sBase || !dBase) {
+        CVPixelBufferUnlockBaseAddress(dst, 0);
+        CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+        CVPixelBufferRelease(dst);
+        return NULL;
+    }
+    if (dw == (int)sw && dh == (int)sh) {
+        size_t rowBytes = MIN(sStride, dStride);
+        for (int y = 0; y < dh; y++) {
             memcpy(dBase + y * dStride, sBase + y * sStride, rowBytes);
+        }
+    } else {
+        vImage_Buffer sbuf = {
+            .data = sBase, .height = (vImagePixelCount)sh,
+            .width = (vImagePixelCount)sw, .rowBytes = sStride
+        };
+        vImage_Buffer dbuf = {
+            .data = dBase, .height = (vImagePixelCount)dh,
+            .width = (vImagePixelCount)dw, .rowBytes = dStride
+        };
+        vImage_Error err = vImageScale_ARGB8888(&sbuf, &dbuf, NULL, kvImageNoFlags);
+        if (err != kvImageNoError) {
+            NSLog(@"[PrivateScreenCapture] vImageScale err=%ld", (long)err);
+            CVPixelBufferUnlockBaseAddress(dst, 0);
+            CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+            CVPixelBufferRelease(dst);
+            return NULL;
         }
     }
     CVPixelBufferUnlockBaseAddress(dst, 0);
