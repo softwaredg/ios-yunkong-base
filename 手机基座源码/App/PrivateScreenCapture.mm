@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <CoreVideo/CoreVideo.h>
+#import <Accelerate/Accelerate.h>
 #import <dlfcn.h>
 #import <string.h>
 
@@ -426,9 +427,13 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
             NSDictionary *attrs = @{ (id)kCVPixelBufferIOSurfacePropertiesKey : @{} };
             if (_pbFromSurface(kCFAllocatorDefault, _surface, (__bridge CFDictionaryRef)attrs, &wrapped) == kCVReturnSuccess && wrapped) {
                 if ([self bufferLooksReal:wrapped]) {
-                    // Do NOT copyDetached here — H264Encoder copies once. Double-copy blew RAM.
-                    [self emitRealBuffer:wrapped];
+                    // Detach before return — next tick reuses the same IOSurface.
+                    CVPixelBufferRef detached = [self copyDetachedBGRA:wrapped];
                     CVPixelBufferRelease(wrapped);
+                    if (detached) {
+                        [self emitRealBuffer:detached];
+                        CVPixelBufferRelease(detached);
+                    }
                     return;
                 }
                 CVPixelBufferRelease(wrapped);
