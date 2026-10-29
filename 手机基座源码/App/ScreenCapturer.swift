@@ -20,19 +20,13 @@ final class ScreenCapturer {
     func start() {
         guard !running else { return }
         running = true
-        fallbackStarted = false
+        fallbackStarted = true
         lastFrameAt = Date.distantPast
-        // CARender/IOSurface on this tipa path was producing encodeable black/garbage
-        // frames (PC saw traffic, no picture). Prefer key-window snapshot so the
-        // small/big windows always show real pixels; private capture can be
-        // re-enabled once render is verified non-blank end-to-end.
+        // Private CARender currently yields garbage that still encodes (PC: traffic,
+        // no picture) and was preempting snapshot. Snapshot-only until private
+        // render is proven end-to-end.
         onInfo?("窗口快照推流（保证有画面）· TVH4")
         startWindowSnapshotFallback()
-        if startPrivateCapture() {
-            // Private only upgrades the stream when it emits non-blank frames.
-            // Blank handler stops private; snapshot already running.
-            startWatchdog()
-        }
     }
 
     func stop() {
@@ -137,7 +131,10 @@ final class ScreenCapturer {
         UIGraphicsPushContext(ctx)
         ctx.translateBy(x: 0, y: CGFloat(height))
         ctx.scaleBy(x: CGFloat(width) / window.bounds.width, y: -(CGFloat(height) / window.bounds.height))
-        window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
+        // Opaque backdrop so encoder never sees an empty buffer if hierarchy is blank.
+        ctx.setFillColor(UIColor.darkGray.cgColor)
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
         UIGraphicsPopContext()
 
         let us = UInt64(Date().timeIntervalSince1970 * 1_000_000)
