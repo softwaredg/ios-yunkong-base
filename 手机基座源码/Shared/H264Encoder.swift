@@ -49,12 +49,35 @@ final class H264Encoder {
         VTCompressionSessionPrepareToEncodeFrames(sess)
     }
 
+    /// Drop new frames while one encode is in flight — unbounded queue.async + copy
+    /// was retaining ~16MB/frame and climbing past 1GB.
+    private var inflight = false
+    private let inflightLock = NSLock()
+
     func encode(pixelBuffer: CVPixelBuffer, ptsUs: UInt64, forceKeyframe: Bool = false) {
+        inflightLock.lock()
+        if inflight {
+            inflightLock.unlock()
+            return
+        }
+        inflight = true
+        inflightLock.unlock()
+
         // Private capture reuses one IOSurface each tick. Encoding that surface while the
         // next render writes into it yields one IDR then silence — copy first.
-        guard let copy = Self.copyPixelBuffer(pixelBuffer) else { return }
+        guard let copy = Self.copyPixelBuffer(pixelBuffer) else {
+            inflightLock.lock()
+            inflight = false
+            inflightLock.unlock()
+            return
+        }
         let force = forceKeyframe
         queue.async {
+            defer {
+                self.inflightLock.lock()
+                self.inflight = false
+                self.inflightLock.unlock()
+            }
             guard let session = self.session else { return }
             var props: CFDictionary?
             if force {

@@ -381,70 +381,77 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     _handler(pb, ptsUs);
 }
 
+- (BOOL)tryEmitUICreateScreen:(CADisplayLink *)link {
+    if (!_uiCreateScreen) return NO;
+    // Create-rule API (+1). ARC does not auto-release → CFBridgingRelease.
+    UIImage *shot = CFBridgingRelease((CFTypeRef)_uiCreateScreen());
+    if (!shot) return NO;
+    CVPixelBufferRef fromUI = [self pixelBufferFromUIImage:shot];
+    if (fromUI && [self bufferLooksReal:fromUI]) {
+        [self emitRealBuffer:fromUI link:link];
+        CVPixelBufferRelease(fromUI);
+        return YES;
+    }
+    if (fromUI) CVPixelBufferRelease(fromUI);
+    return NO;
+}
+
 - (void)onTick:(CADisplayLink *)link {
     if (!_handler) return;
+    @autoreleasepool {
+        // CARender first (IOSurface). UICreate only after blanks — it was preferred
+        // every tick and leaked Create-rule UIImages → memory climbed past 1GB.
+        BOOL haveCARender = (_renderByValue != NULL && _surface != NULL && _pbFromSurface != NULL);
+        if (haveCARender) {
+            if (_dirtyFn && _blankStreak == 0 && _haveDirty) {
+                CFIndex dirty = _dirtyFn(NULL);
+                if (dirty == _lastDirty) return;
+                _lastDirty = dirty;
+            } else if (_dirtyFn) {
+                _lastDirty = _dirtyFn(NULL);
+                _haveDirty = YES;
+            }
 
-    // Prefer _UICreateScreenUIImage when present (TrollStore / private UIKit).
-    if (_uiCreateScreen) {
-        UIImage *shot = _uiCreateScreen();
-        CVPixelBufferRef fromUI = [self pixelBufferFromUIImage:shot];
-        if (fromUI && [self bufferLooksReal:fromUI]) {
-            [self emitRealBuffer:fromUI link:link];
-            CVPixelBufferRelease(fromUI);
+            [self renderIntoSurface];
+
+            CVPixelBufferRef wrapped = NULL;
+            NSDictionary *attrs = @{ (id)kCVPixelBufferIOSurfacePropertiesKey : @{} };
+            if (_pbFromSurface(kCFAllocatorDefault, _surface, (__bridge CFDictionaryRef)attrs, &wrapped) == kCVReturnSuccess && wrapped) {
+                if ([self bufferLooksReal:wrapped]) {
+                    // Do NOT copyDetached here — H264Encoder copies once. Double-copy blew RAM.
+                    [self emitRealBuffer:wrapped link:link];
+                    CVPixelBufferRelease(wrapped);
+                    return;
+                }
+                CVPixelBufferRelease(wrapped);
+            }
+
+            _blankStreak++;
+            if (_blankStreak > 0 && (_blankStreak % 8) == 0) {
+                _mode = (PSCRenderMode)((_mode + 1) % PSCRenderModeCount);
+            }
+            if (_blankStreak == 20 || _blankStreak == 40 || _blankStreak == 60) {
+                [self restartSurfaces];
+            }
+            // After sustained blank, try UICreate once per tick as fallback.
+            if (_blankStreak >= 8 && [self tryEmitUICreateScreen:link]) return;
+            if (_blankStreak >= 90 && !_blankNotified) {
+                _blankNotified = YES;
+                NSLog(@"[PrivateScreenCapture] blank after resets — notify fallback");
+                if (_blankHandler) _blankHandler();
+            }
             return;
         }
-        if (fromUI) CVPixelBufferRelease(fromUI);
-    }
 
-    if (!_renderByValue || !_surface) {
+        if ([self tryEmitUICreateScreen:link]) return;
+
         _blankStreak++;
         if (_blankStreak >= 90 && !_blankNotified) {
             _blankNotified = YES;
             NSLog(@"[PrivateScreenCapture] blank (no CARender) — notify fallback");
             if (_blankHandler) _blankHandler();
         }
-        return;
     }
-
-    if (_dirtyFn && _blankStreak == 0 && _haveDirty) {
-        CFIndex dirty = _dirtyFn(NULL);
-        if (dirty == _lastDirty) return;
-        _lastDirty = dirty;
-    } else if (_dirtyFn) {
-        _lastDirty = _dirtyFn(NULL);
-        _haveDirty = YES;
-    }
-
-    [self renderIntoSurface];
-
-    CVPixelBufferRef wrapped = NULL;
-    NSDictionary *attrs = @{ (id)kCVPixelBufferIOSurfacePropertiesKey : @{} };
-    if (_pbFromSurface(kCFAllocatorDefault, _surface, (__bridge CFDictionaryRef)attrs, &wrapped) != kCVReturnSuccess || !wrapped) {
-        return;
-    }
-
-    if (![self bufferLooksReal:wrapped]) {
-        _blankStreak++;
-        CVPixelBufferRelease(wrapped);
-        if (_blankStreak > 0 && (_blankStreak % 8) == 0) {
-            _mode = (PSCRenderMode)((_mode + 1) % PSCRenderModeCount);
-        }
-        if (_blankStreak == 20 || _blankStreak == 40 || _blankStreak == 60) {
-            [self restartSurfaces];
-        }
-        if (_blankStreak >= 90 && !_blankNotified) {
-            _blankNotified = YES;
-            NSLog(@"[PrivateScreenCapture] blank after resets — notify fallback");
-            if (_blankHandler) _blankHandler();
-        }
-        return;
-    }
-
-    CVPixelBufferRef detached = [self copyDetachedBGRA:wrapped];
-    CVPixelBufferRelease(wrapped);
-    if (!detached) return;
-    [self emitRealBuffer:detached link:link];
-    CVPixelBufferRelease(detached);
 }
 
 - (void)dealloc {
