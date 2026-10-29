@@ -5,6 +5,11 @@ import Combine
 import Darwin
 import CoreVideo
 
+/// Filled from MainActor, read after a short wait on the NW queue (control ack).
+private final class ControlReplyBox: @unchecked Sendable {
+    var value: [String: Any]?
+}
+
 @MainActor
 final class AppRuntime: ObservableObject {
     @Published var running = false
@@ -160,14 +165,29 @@ final class AppRuntime: ObservableObject {
         )
         let svc = LocalService(info: info)
         svc.memoryLimitBytes = memoryLimitBytes
-        svc.memoryStatsProvider = {
+        // @Sendable: must run on LocalService's NW queue without hopping to MainActor
+        // (otherwise /api/info deadlocks whenever main is busy with capture).
+        svc.memoryStatsProvider = { @Sendable in
             (ProcessMemory.footprintBytes(), ProcessMemory.residentBytes())
         }
         svc.onRestartRequested = { [weak self] in
             Task { @MainActor in self?.restartService(reason: "api-restart") }
         }
         svc.onControlJSON = { [weak self] obj in
-            self?.handleControl(obj)
+            guard let self else { return nil }
+            // handleControl is MainActor-isolated; prefer assumeIsolated when already
+            // on main, else hop without sync-wait from the NW queue.
+            if Thread.isMainThread {
+                return MainActor.assumeIsolated { self.handleControl(obj) }
+            }
+            let box = ControlReplyBox()
+            let gate = DispatchSemaphore(value: 0)
+            Task { @MainActor in
+                box.value = self.handleControl(obj)
+                gate.signal()
+            }
+            _ = gate.wait(timeout: .now() + 1.5)
+            return box.value
         }
         do {
             try svc.start()
@@ -243,14 +263,18 @@ final class AppRuntime: ObservableObject {
 
     private func wireEncoder() {
         encoder.onParameterSets = { [weak self] sps, pps in
-            guard let self else { return }
-            self.service?.publishConfiguration(sps: sps, pps: pps)
-            self.tcpVideo.setConfiguration(TVH4.annexBConfig(sps: sps, pps: pps))
+            Task { @MainActor in
+                guard let self else { return }
+                self.service?.publishConfiguration(sps: sps, pps: pps)
+                self.tcpVideo.setConfiguration(TVH4.annexBConfig(sps: sps, pps: pps))
+            }
         }
         encoder.onFrame = { [weak self] avcc, key, ts in
-            guard let self else { return }
-            self.service?.publishFrame(avcc: avcc, keyframe: key, timestampUs: ts)
-            self.tcpVideo.sendFrame(annexB: TVH4.avccToAnnexB(avcc), keyframe: key, ptsUs: ts)
+            Task { @MainActor in
+                guard let self else { return }
+                self.service?.publishFrame(avcc: avcc, keyframe: key, timestampUs: ts)
+                self.tcpVideo.sendFrame(annexB: TVH4.avccToAnnexB(avcc), keyframe: key, ptsUs: ts)
+            }
         }
     }
 
@@ -387,15 +411,56 @@ final class AppRuntime: ObservableObject {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, options: [.mixWithOthers])
             try session.setActive(true)
-            let url = Bundle.main.url(forResource: "silence", withExtension: "wav")
-            if let url, let player = try? AVAudioPlayer(contentsOf: url) {
-                player.numberOfLoops = -1
-                player.volume = 0.01
-                player.play()
-                audioPlayer = player
+            // Bundle may not ship silence.wav — synthesize a 1s mono PCM wav in-memory
+            // so UIBackgroundModes=audio actually keeps the process runnable.
+            let wav: Data
+            if let url = Bundle.main.url(forResource: "silence", withExtension: "wav"),
+               let file = try? Data(contentsOf: url) {
+                wav = file
+            } else {
+                wav = Self.silentWavData(sampleRate: 8_000, seconds: 1)
             }
+            let player = try AVAudioPlayer(data: wav)
+            player.numberOfLoops = -1
+            player.volume = 0.01
+            player.prepareToPlay()
+            guard player.play() else { return }
+            audioPlayer = player
         } catch {
-            /* optional */
+            /* optional but without it iOS suspends → :11019/:5909 accept with 0 bytes */
         }
+    }
+
+    /// Minimal PCM WAV (silence) for background audio keep-alive.
+    private static func silentWavData(sampleRate: Int, seconds: Int) -> Data {
+        let channels = 1
+        let bitsPerSample = 16
+        let numSamples = sampleRate * seconds * channels
+        let dataSize = numSamples * (bitsPerSample / 8)
+        var data = Data(capacity: 44 + dataSize)
+        func appendASCII(_ s: String) { data.append(contentsOf: s.utf8) }
+        func appendU32(_ v: UInt32) {
+            var le = v.littleEndian
+            withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
+        }
+        func appendU16(_ v: UInt16) {
+            var le = v.littleEndian
+            withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
+        }
+        appendASCII("RIFF")
+        appendU32(UInt32(36 + dataSize))
+        appendASCII("WAVE")
+        appendASCII("fmt ")
+        appendU32(16)
+        appendU16(1) // PCM
+        appendU16(UInt16(channels))
+        appendU32(UInt32(sampleRate))
+        appendU32(UInt32(sampleRate * channels * bitsPerSample / 8))
+        appendU16(UInt16(channels * bitsPerSample / 8))
+        appendU16(UInt16(bitsPerSample))
+        appendASCII("data")
+        appendU32(UInt32(dataSize))
+        data.append(Data(count: dataSize))
+        return data
     }
 }
