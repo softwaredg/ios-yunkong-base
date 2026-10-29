@@ -7,12 +7,11 @@ enum HotspotKeepAlive {
 
     static func register() {
         guard !registered else { return }
-        let options = [kNEHotspotHelperOptionDisplayName: "云控基座"]
+        let options: [String: NSObject] = [
+            kNEHotspotHelperOptionDisplayName: "云控基座" as NSString,
+        ]
         let ok = NEHotspotHelper.register(options: options, queue: .main) { cmd in
             let response = cmd.createResponse(.success)
-            if cmd.commandType == .filterScanList || cmd.commandType == .evaluate {
-                response.networkList = []
-            }
             response.deliver()
         }
         registered = ok
