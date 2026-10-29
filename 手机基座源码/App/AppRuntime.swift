@@ -359,15 +359,18 @@ final class AppRuntime: ObservableObject {
         }
         capturer.onPixelBuffer = { [weak self] pb, ts in
             guard let self else { return }
-            // Encode on the capture queue — never hop to MainActor (4MB copies there ≈ 2fps).
-            // pipeline.handle → encoder.copyPixelBuffer is synchronous; safe before ObjC releases.
-            self.pipeline.handle(pixelBuffer: pb, ptsUs: ts)
-            if self.pipeline.encodedFrameCount == 1 {
-                let w = CVPixelBufferGetWidth(pb)
-                let h = CVPixelBufferGetHeight(pb)
-                Task { @MainActor in
-                    self.status = "推流 \(w)×\(h) · TVH4/\(TcpVideoHub.defaultPort)"
-                    self.capturing = true
+            // Never copy/encode on the capture timer queue — that serialized ticks to ~3fps.
+            let retained = Unmanaged.passRetained(pb)
+            DispatchQueue.global(qos: .userInitiated).async {
+                let buffer = retained.takeRetainedValue()
+                self.pipeline.handle(pixelBuffer: buffer, ptsUs: ts)
+                if self.pipeline.encodedFrameCount == 1 {
+                    let w = CVPixelBufferGetWidth(buffer)
+                    let h = CVPixelBufferGetHeight(buffer)
+                    Task { @MainActor in
+                        self.status = "推流 \(w)×\(h) · TVH4/\(TcpVideoHub.defaultPort)"
+                        self.capturing = true
+                    }
                 }
             }
         }

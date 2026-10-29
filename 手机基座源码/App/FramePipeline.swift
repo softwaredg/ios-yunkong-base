@@ -54,21 +54,20 @@ final class FramePipeline: @unchecked Sendable {
     }
 
     func handle(pixelBuffer pb: CVPixelBuffer, ptsUs: UInt64) {
-        let w = Int32(CVPixelBufferGetWidth(pb))
-        let h = Int32(CVPixelBufferGetHeight(pb))
+        let w = CVPixelBufferGetWidth(pb)
+        let h = CVPixelBufferGetHeight(pb)
         lock.lock()
         let svc = service
         let n = frameCount
         if !started {
             started = true
-            lock.unlock()
-            try? encoder.start(width: w, height: h, fps: 30, bitrateBps: 4_000_000)
-            lock.lock()
+            encoder.configure(fps: 30, bitrateBps: 4_000_000)
         }
         frameCount = n + 1
         let force = (n % 30) == 0
         lock.unlock()
-        svc?.updateGeometry(width: Int(w), height: Int(h))
+        svc?.updateGeometry(width: w, height: h)
+        // Encoder copies/scales on its own queue (session created lazily at encode size).
         encoder.encode(pixelBuffer: pb, ptsUs: ptsUs, forceKeyframe: force)
     }
 

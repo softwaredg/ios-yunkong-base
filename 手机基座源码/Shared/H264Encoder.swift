@@ -2,6 +2,7 @@ import Foundation
 import VideoToolbox
 import CoreMedia
 import CoreVideo
+import CoreGraphics
 
 /// VideoToolbox H.264 encoder → AVCC length-prefixed NALs (+ SPS/PPS for TVH4 config).
 final class H264Encoder {
@@ -15,9 +16,27 @@ final class H264Encoder {
     private var sps: Data?
     private var pps: Data?
     private var sentConfig = false
+    private var targetFps: Int32 = 30
+    private var targetBitrate: Int32 = 4_000_000
+    /// Cap long edge so SE-class phones can hold ~30fps (full 750×1334 encode was ~3fps).
+    private let maxSide = 720
+
+    private var inflight = false
+    private var pending: (Unmanaged<CVPixelBuffer>, UInt64, Bool)?
+    private let inflightLock = NSLock()
+
+    func configure(fps: Int32, bitrateBps: Int32) {
+        targetFps = max(5, fps)
+        targetBitrate = max(500_000, bitrateBps)
+    }
 
     func start(width: Int32, height: Int32, fps: Int32, bitrateBps: Int32) throws {
-        stop()
+        configure(fps: fps, bitrateBps: bitrateBps)
+        try startSession(width: width, height: height)
+    }
+
+    private func startSession(width: Int32, height: Int32) throws {
+        stopSessionOnly()
         var sess: VTCompressionSession?
         let status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
@@ -42,24 +61,21 @@ final class H264Encoder {
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrateBps as CFNumber)
-        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
-        let dur = max(1, fps * 2) as CFNumber
+        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: targetBitrate as CFNumber)
+        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: targetFps as CFNumber)
+        let dur = max(1, targetFps * 2) as CFNumber
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: dur)
         VTCompressionSessionPrepareToEncodeFrames(sess)
     }
 
-    /// Latest-wins (not drop-all): at most one encode + one pending copy — avoids 1GB backlog
-    /// while keeping wall/focus near capture rate instead of ~2 fps.
-    private var inflight = false
-    private var pending: (CVPixelBuffer, UInt64, Bool)?
-    private let inflightLock = NSLock()
-
+    /// Latest-wins. Copy/scale happens on encoder queue so capture timer stays at 30Hz.
     func encode(pixelBuffer: CVPixelBuffer, ptsUs: UInt64, forceKeyframe: Bool = false) {
-        // Private capture reuses one IOSurface each tick — copy before queue.
-        guard let copy = Self.copyPixelBuffer(pixelBuffer) else { return }
+        let retained = Unmanaged.passRetained(pixelBuffer)
         inflightLock.lock()
-        pending = (copy, ptsUs, forceKeyframe)
+        if let old = pending {
+            old.0.release()
+        }
+        pending = (retained, ptsUs, forceKeyframe)
         let start = !inflight
         if start { inflight = true }
         inflightLock.unlock()
@@ -77,7 +93,21 @@ final class H264Encoder {
                 return
             }
             inflightLock.unlock()
-            guard let session = session, let (copy, ptsUs, force) = next else { continue }
+
+            let (retained, ptsUs, force) = next!
+            let src = retained.takeRetainedValue()
+            guard let copy = Self.copyPixelBuffer(src, maxSide: maxSide) else { continue }
+
+            let w = Int32(CVPixelBufferGetWidth(copy))
+            let h = Int32(CVPixelBufferGetHeight(copy))
+            if session == nil {
+                do { try startSession(width: w, height: h) } catch {
+                    NSLog("[H264] start failed %@", error.localizedDescription)
+                    continue
+                }
+            }
+
+            guard let session else { continue }
             var props: CFDictionary?
             if force {
                 props = [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary
@@ -98,17 +128,23 @@ final class H264Encoder {
         }
     }
 
-    /// Independent CPU copy so the capture IOSurface can be rendered again immediately.
-    private static func copyPixelBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
-        let w = CVPixelBufferGetWidth(src)
-        let h = CVPixelBufferGetHeight(src)
-        let fmt = CVPixelBufferGetPixelFormatType(src)
+    /// Copy (+ optional downscale) so capture IOSurface can be rendered again immediately.
+    private static func copyPixelBuffer(_ src: CVPixelBuffer, maxSide: Int) -> CVPixelBuffer? {
+        let sw = CVPixelBufferGetWidth(src)
+        let sh = CVPixelBufferGetHeight(src)
+        let longEdge = max(sw, sh)
+        let scale = longEdge > maxSide ? CGFloat(maxSide) / CGFloat(longEdge) : 1
+        let dw = max(2, Int((CGFloat(sw) * scale).rounded(.toNearestOrAwayFromZero)))
+        let dh = max(2, Int((CGFloat(sh) * scale).rounded(.toNearestOrAwayFromZero)))
+        let fmt = kCVPixelFormatType_32BGRA
         var dst: CVPixelBuffer?
         let attrs: [String: Any] = [
             kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any],
+            kCVPixelBufferCGImageCompatibilityKey as String: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey as String: true,
         ]
         guard CVPixelBufferCreate(
-            kCFAllocatorDefault, w, h, fmt, attrs as CFDictionary, &dst
+            kCFAllocatorDefault, dw, dh, fmt, attrs as CFDictionary, &dst
         ) == kCVReturnSuccess, let dst else { return nil }
 
         CVPixelBufferLockBaseAddress(src, .readOnly)
@@ -118,41 +154,76 @@ final class H264Encoder {
             CVPixelBufferUnlockBaseAddress(dst, [])
         }
 
-        let planeCount = CVPixelBufferGetPlaneCount(src)
-        if planeCount <= 1 {
-            guard let s = CVPixelBufferGetBaseAddress(src),
-                  let d = CVPixelBufferGetBaseAddress(dst) else { return nil }
+        if scale == 1, CVPixelBufferGetPixelFormatType(src) == fmt,
+           let s = CVPixelBufferGetBaseAddress(src),
+           let d = CVPixelBufferGetBaseAddress(dst) {
             let srcRow = CVPixelBufferGetBytesPerRow(src)
             let dstRow = CVPixelBufferGetBytesPerRow(dst)
             let rowBytes = min(srcRow, dstRow)
-            for y in 0..<h {
+            for y in 0..<dh {
                 memcpy(d.advanced(by: y * dstRow), s.advanced(by: y * srcRow), rowBytes)
             }
-        } else {
-            for p in 0..<planeCount {
-                guard let s = CVPixelBufferGetBaseAddressOfPlane(src, p),
-                      let d = CVPixelBufferGetBaseAddressOfPlane(dst, p) else { return nil }
-                let ph = CVPixelBufferGetHeightOfPlane(src, p)
-                let srcRow = CVPixelBufferGetBytesPerRowOfPlane(src, p)
-                let dstRow = CVPixelBufferGetBytesPerRowOfPlane(dst, p)
-                let rowBytes = min(srcRow, dstRow)
-                for y in 0..<ph {
-                    memcpy(d.advanced(by: y * dstRow), s.advanced(by: y * srcRow), rowBytes)
-                }
+            return dst
+        }
+
+        guard let destBase = CVPixelBufferGetBaseAddress(dst) else { return nil }
+        let destStride = CVPixelBufferGetBytesPerRow(dst)
+        guard let cs = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        guard let ctx = CGContext(
+            data: destBase,
+            width: dw,
+            height: dh,
+            bitsPerComponent: 8,
+            bytesPerRow: destStride,
+            space: cs,
+            bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+        ) else { return nil }
+
+        var cgImage: CGImage?
+        VTCreateCGImageFromCVPixelBuffer(src, options: nil, imageOut: &cgImage)
+        if let cgImage {
+            ctx.interpolationQuality = .medium
+            ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: dw, height: dh))
+            return dst
+        }
+
+        // Fallback without VTCreateCGImage: nearest-neighbor from BGRA base.
+        guard let s = CVPixelBufferGetBaseAddress(src) else { return nil }
+        let srcRow = CVPixelBufferGetBytesPerRow(src)
+        let srcFmt = CVPixelBufferGetPixelFormatType(src)
+        guard srcFmt == kCVPixelFormatType_32BGRA || srcFmt == kCVPixelFormatType_32ARGB else { return nil }
+        for y in 0..<dh {
+            let sy = min(sh - 1, Int(CGFloat(y) / scale))
+            let dRow = destBase.advanced(by: y * destStride)
+            let sRow = s.advanced(by: sy * srcRow)
+            for x in 0..<dw {
+                let sx = min(sw - 1, Int(CGFloat(x) / scale))
+                memcpy(dRow.advanced(by: x * 4), sRow.advanced(by: sx * 4), 4)
             }
         }
         return dst
     }
 
     func stop() {
+        inflightLock.lock()
+        if let old = pending {
+            old.0.release()
+            pending = nil
+        }
+        inflight = false
+        inflightLock.unlock()
+        stopSessionOnly()
+        sps = nil
+        pps = nil
+        sentConfig = false
+    }
+
+    private func stopSessionOnly() {
         if let session {
             VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
             VTCompressionSessionInvalidate(session)
         }
         session = nil
-        sps = nil
-        pps = nil
-        sentConfig = false
     }
 
     private func handle(_ sampleBuffer: CMSampleBuffer) {
@@ -193,5 +264,4 @@ final class H264Encoder {
         let us = UInt64(max(0, pts.seconds * 1_000_000))
         onFrame?(data, isKeyframe, us)
     }
-
 }
