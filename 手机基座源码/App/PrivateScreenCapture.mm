@@ -48,6 +48,7 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     NSInteger _fps;
     NSInteger _blankStreak;
     NSInteger _surfaceResets;
+    NSInteger _looksRealCounter;
     BOOL _blankNotified;
     CFIndex _lastDirty;
     BOOL _haveDirty;
@@ -88,6 +89,7 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     _fps = 30;
     _blankStreak = 0;
     _surfaceResets = 0;
+    _looksRealCounter = 0;
     _blankNotified = NO;
     _lastDirty = -1;
     _haveDirty = NO;
@@ -151,6 +153,14 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     CGSize px = UIScreen.mainScreen.nativeBounds.size;
     int width = (int)round(MAX(px.width, 2));
     int height = (int)round(MAX(px.height, 2));
+    // CARender into native 750×1334 was ~3fps; match encoder cap so render+copy stay light.
+    static const int kMaxSide = 720;
+    int longEdge = MAX(width, height);
+    if (longEdge > kMaxSide) {
+        float s = (float)kMaxSide / (float)longEdge;
+        width = MAX(2, ((int)(width * s) / 2) * 2);
+        height = MAX(2, ((int)(height * s) / 2) * 2);
+    }
     int bytesPerElement = 4;
     size_t bytesPerRow = (size_t)bytesPerElement * (size_t)width;
     return @{
@@ -426,7 +436,10 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
             CVPixelBufferRef wrapped = NULL;
             NSDictionary *attrs = @{ (id)kCVPixelBufferIOSurfacePropertiesKey : @{} };
             if (_pbFromSurface(kCFAllocatorDefault, _surface, (__bridge CFDictionaryRef)attrs, &wrapped) == kCVReturnSuccess && wrapped) {
-                if ([self bufferLooksReal:wrapped]) {
+                // Full pixel scan every tick was wasteful; spot-check while streaming.
+                BOOL check = ((_looksRealCounter++ % 15) == 0) || _blankStreak > 0;
+                BOOL real = check ? [self bufferLooksReal:wrapped] : YES;
+                if (real) {
                     // Detach before return — next tick reuses the same IOSurface.
                     CVPixelBufferRef detached = [self copyDetachedBGRA:wrapped];
                     CVPixelBufferRelease(wrapped);
