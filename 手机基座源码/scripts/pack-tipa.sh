@@ -55,17 +55,15 @@ if grep -q '<!--' "$ROOT/App/App.entitlements"; then
   echo "error: App.entitlements has XML comments" >&2
   exit 1
 fi
-# Copy to ASCII temp first — plutil/ldid reading 手机基座源码/... produced empty <dict/> (181 bytes).
+# ASCII temp copy only — do NOT plutil-convert (GHA plutil rewrote a valid 1.5KB file to empty <dict/>).
 ENT_XML="$STAGE/App.entitlements.xml"
 cp "$ROOT/App/App.entitlements" "$ENT_XML"
-if command -v plutil >/dev/null 2>&1; then
-  plutil -convert xml1 "$ENT_XML"
-fi
 echo "entitlements file for sign: $ENT_XML"
+ls -la "$ROOT/App/App.entitlements" "$ENT_XML"
 wc -c "$ENT_XML"
-cat "$ENT_XML"
 grep -E 'global-capture|no-sandbox' "$ENT_XML" || {
-  echo "error: ENT_XML missing required keys" >&2
+  echo "error: ENT_XML missing required keys after cp" >&2
+  cat "$ENT_XML" >&2
   exit 1
 }
 BIN="$APP_IN_STAGE/${APP_NAME}"
