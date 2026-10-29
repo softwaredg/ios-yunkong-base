@@ -11,7 +11,9 @@ typedef void *IOSurfaceAcceleratorRef;
 typedef IOSurfaceRef (*IOSurfaceCreateFn)(CFDictionaryRef);
 typedef size_t (*IOSurfaceAlignPropertyFn)(CFStringRef, size_t);
 typedef CFIndex (*CARenderServerGetDirtyFrameCountFn)(void *);
-typedef void (*CARenderServerRenderDisplayFn)(kern_return_t, CFStringRef, IOSurfaceRef, int, int);
+// First arg is an OUT kern_return_t* (passing 0/NULL is ok). Wrong calling
+// convention previously passed kern_return_t by value and could no-op render.
+typedef void (*CARenderServerRenderDisplayFn)(kern_return_t * _Nullable, CFStringRef, IOSurfaceRef, int, int);
 typedef kern_return_t (*IOSurfaceAcceleratorCreateFn)(CFAllocatorRef, void *, IOSurfaceAcceleratorRef *);
 typedef kern_return_t (*IOSurfaceAcceleratorTransferSurfaceFn)(IOSurfaceAcceleratorRef, IOSurfaceRef, IOSurfaceRef, CFDictionaryRef, void *, void *, void *);
 typedef CFRunLoopSourceRef (*IOSurfaceAcceleratorGetRunLoopSourceFn)(IOSurfaceAcceleratorRef);
@@ -23,9 +25,13 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     IOSurfaceRef _src;
     IOSurfaceAcceleratorRef _accel;
     void (^_handler)(CVPixelBufferRef, uint64_t);
+    void (^_blankHandler)(void);
     CFIndex _lastDirty;
     NSInteger _ticksSinceEmit;
     NSInteger _fps;
+    NSInteger _blankStreak;
+    BOOL _blankNotified;
+    CFStringRef _displayName;
     IOSurfaceCreateFn _surfaceCreate;
     IOSurfaceAlignPropertyFn _alignProp;
     CARenderServerGetDirtyFrameCountFn _dirtyFn;
@@ -57,6 +63,9 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     _fps = 15;
     _lastDirty = -1;
     _ticksSinceEmit = 0;
+    _blankStreak = 0;
+    _blankNotified = NO;
+    _displayName = CFSTR("LCD");
     [self resolveSymbols];
     return self;
 }
@@ -73,7 +82,6 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     _accelSource = (IOSurfaceAcceleratorGetRunLoopSourceFn)dlsym(RTLD_DEFAULT, "IOSurfaceAcceleratorGetRunLoopSource");
     _pbFromSurface = (CVPixelBufferCreateWithIOSurfaceFn)dlsym(RTLD_DEFAULT, "CVPixelBufferCreateWithIOSurface");
 
-    // Resolve IOSurface property keys (they are CFString constants in the framework).
     CFStringRef *p;
     if ((p = (CFStringRef *)dlsym(RTLD_DEFAULT, "kIOSurfaceBytesPerElement"))) _kBytesPerElement = *p;
     if ((p = (CFStringRef *)dlsym(RTLD_DEFAULT, "kIOSurfaceBytesPerRow"))) _kBytesPerRow = *p;
@@ -82,7 +90,6 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     if ((p = (CFStringRef *)dlsym(RTLD_DEFAULT, "kIOSurfacePixelFormat"))) _kPixelFormat = *p;
     if ((p = (CFStringRef *)dlsym(RTLD_DEFAULT, "kIOSurfaceAllocSize"))) _kAllocSize = *p;
 
-    // Fallback string keys if constants unavailable.
     if (!_kBytesPerElement) _kBytesPerElement = CFSTR("BytesPerElement");
     if (!_kBytesPerRow) _kBytesPerRow = CFSTR("BytesPerRow");
     if (!_kWidth) _kWidth = CFSTR("Width");
@@ -146,10 +153,16 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     }
 }
 
+- (void)setBlankHandler:(void (^)(void))handler {
+    _blankHandler = [handler copy];
+}
+
 - (void)startWithHandler:(void (^)(CVPixelBufferRef, uint64_t))handler {
     [self resolveSymbols];
     if (!_available) return;
     _handler = [handler copy];
+    _blankStreak = 0;
+    _blankNotified = NO;
     void (^go)(void) = ^{
         if (![self ensureSurfaces]) return;
         if (self->_link) return;
@@ -172,22 +185,66 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     else dispatch_sync(dispatch_get_main_queue(), stop);
 }
 
+/// Sample BGRA for non-black content. Empty CARender surfaces encode as traffic with no picture.
+- (BOOL)pixelBufferHasContent:(CVPixelBufferRef)pb {
+    if (CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return NO;
+    void *base = CVPixelBufferGetBaseAddress(pb);
+    size_t h = CVPixelBufferGetHeight(pb);
+    size_t w = CVPixelBufferGetWidth(pb);
+    size_t stride = CVPixelBufferGetBytesPerRow(pb);
+    BOOL ok = NO;
+    if (base && h > 0 && w > 0 && stride >= 4) {
+        size_t stepY = MAX((size_t)1, h / 24);
+        size_t stepX = MAX((size_t)16, (w * 4) / 32);
+        uint32_t nonzero = 0;
+        uint32_t samples = 0;
+        for (size_t y = 0; y < h; y += stepY) {
+            uint8_t *row = (uint8_t *)base + y * stride;
+            for (size_t x = 0; x + 3 < stride && x / 4 < w; x += stepX) {
+                // BGRA — ignore alpha; any RGB channel lit counts.
+                if (row[x] | row[x + 1] | row[x + 2]) nonzero++;
+                samples++;
+            }
+        }
+        // Real UI has many lit samples; pure black / uncleared surface ≈ 0.
+        ok = samples > 0 && nonzero * 50 > samples; // >2% lit
+    }
+    CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    return ok;
+}
+
+- (void)renderInto:(IOSurfaceRef)surface {
+    if (!_renderFn || !surface) return;
+    kern_return_t kr = KERN_SUCCESS;
+    static CFStringRef names[] = {
+        NULL, // filled with _displayName
+        CFSTR("LCD"),
+        CFSTR("Main"),
+        CFSTR("Display"),
+    };
+    names[0] = _displayName;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (!names[i]) continue;
+        kr = KERN_SUCCESS;
+        _renderFn(&kr, names[i], surface, 0, 0);
+        if (kr == KERN_SUCCESS) {
+            _displayName = names[i];
+            return;
+        }
+    }
+}
+
 - (void)onTick:(CADisplayLink *)link {
     if (!_handler || !_renderFn || !_dst) return;
 
-    // Always emit — dirty skip previously stalled the encoder on static UI, and
-    // "force every 3 ticks" still left PC clients with config+one key only when
-    // encode of the shared IOSurface failed on subsequent frames.
     (void)_dirtyFn;
     (void)_lastDirty;
     _ticksSinceEmit = 0;
 
-    // Prefer direct render into destination — accelerator path can silently
-    // leave an empty surface on some devices / entitlement sets.
-    _renderFn(0, CFSTR("LCD"), _dst, 0, 0);
+    // Direct render into destination. Optionally also try accelerator path.
+    [self renderInto:_dst];
     if (_src && _accel && _accelTransfer) {
-        // Optional second path: render to src then copy (TrollVNC style).
-        _renderFn(0, CFSTR("LCD"), _src, 0, 0);
+        [self renderInto:_src];
         _accelTransfer(_accel, _src, _dst, NULL, NULL, NULL, NULL);
     }
 
@@ -196,10 +253,21 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     if (_pbFromSurface(kCFAllocatorDefault, _dst, (__bridge CFDictionaryRef)attrs, &pb) != kCVReturnSuccess || !pb) {
         return;
     }
+
+    if (![self pixelBufferHasContent:pb]) {
+        _blankStreak++;
+        CVPixelBufferRelease(pb);
+        if (_blankStreak >= 8 && !_blankNotified) {
+            _blankNotified = YES;
+            NSLog(@"[PrivateScreenCapture] blank frames — notifying fallback");
+            if (_blankHandler) _blankHandler();
+        }
+        return;
+    }
+    _blankStreak = 0;
+
     uint64_t ptsUs = (uint64_t)llround(link.timestamp * 1e6);
     if (ptsUs == 0) ptsUs = (uint64_t)llround(CACurrentMediaTime() * 1e6);
-    // Handler (Swift) must retain across any async hop — we release our Create ref
-    // immediately after the sync callback returns.
     _handler(pb, ptsUs);
     CVPixelBufferRelease(pb);
 }
