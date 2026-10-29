@@ -338,6 +338,8 @@ final class LocalService {
                 "lastReason": lastReason,
             ],
             "autoStart": true,
+            "appVersion": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
+            "captureMode": "window-snapshot",
         ]
     }
 
