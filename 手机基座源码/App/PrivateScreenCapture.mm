@@ -175,17 +175,11 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
 - (void)onTick:(CADisplayLink *)link {
     if (!_handler || !_renderFn || !_dst) return;
 
-    // Dirty skip is an optimization only — never stall the stream. Static UI
-    // used to stop all frames after the first key, so PC saw "no traffic".
-    _ticksSinceEmit += 1;
-    BOOL changed = YES;
-    if (_dirtyFn) {
-        CFIndex dirty = _dirtyFn(NULL);
-        changed = (dirty != _lastDirty);
-        if (changed) _lastDirty = dirty;
-    }
-    // At 15fps: force at least ~5fps even when the display claims unchanged.
-    if (!changed && _ticksSinceEmit < 3) return;
+    // Always emit — dirty skip previously stalled the encoder on static UI, and
+    // "force every 3 ticks" still left PC clients with config+one key only when
+    // encode of the shared IOSurface failed on subsequent frames.
+    (void)_dirtyFn;
+    (void)_lastDirty;
     _ticksSinceEmit = 0;
 
     // Prefer direct render into destination — accelerator path can silently
@@ -204,7 +198,8 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     }
     uint64_t ptsUs = (uint64_t)llround(link.timestamp * 1e6);
     if (ptsUs == 0) ptsUs = (uint64_t)llround(CACurrentMediaTime() * 1e6);
-    // Caller must retain if it hops off this stack before encode.
+    // Handler (Swift) must retain across any async hop — we release our Create ref
+    // immediately after the sync callback returns.
     _handler(pb, ptsUs);
     CVPixelBufferRelease(pb);
 }
