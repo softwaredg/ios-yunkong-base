@@ -51,14 +51,29 @@ if [[ -f "$PLIST" ]]; then
   echo "stamped Info.plist CFBundleShortVersionString=${VERSION}"
 fi
 
-if command -v ldid >/dev/null 2>&1; then
-  ldid -S"$ROOT/App/App.entitlements" "$APP_IN_STAGE/${APP_NAME}"
-  if [[ -d "$APP_IN_STAGE/PlugIns/Broadcast.appex" ]]; then
-    rm -rf "$APP_IN_STAGE/PlugIns/Broadcast.appex/_CodeSignature" || true
-    ldid -S"$ROOT/Extension/Extension.entitlements" "$APP_IN_STAGE/PlugIns/Broadcast.appex/Broadcast"
-  fi
-else
-  echo "warning: ldid not found; tipa may not install on TrollStore" >&2
+if ! command -v ldid >/dev/null 2>&1; then
+  echo "error: ldid required — tipa without private entitlements falls to 前台快照" >&2
+  exit 1
+fi
+# ldid 2.x silently embeds <dict/> if the entitlements plist has XML comments.
+if grep -q '<!--' "$ROOT/App/App.entitlements"; then
+  echo "error: App.entitlements has XML comments — ldid will embed empty entitlements" >&2
+  exit 1
+fi
+ldid -S"$ROOT/App/App.entitlements" "$APP_IN_STAGE/${APP_NAME}"
+# Fail closed: empty signature blob means CARender/IOHID stay dead on device.
+if ! grep -a -q 'global-capture' "$APP_IN_STAGE/${APP_NAME}"; then
+  echo "error: ldid did not embed QuartzCore.global-capture into ${APP_NAME}" >&2
+  exit 1
+fi
+if ! grep -a -q 'no-sandbox' "$APP_IN_STAGE/${APP_NAME}"; then
+  echo "error: ldid did not embed no-sandbox into ${APP_NAME}" >&2
+  exit 1
+fi
+echo "ldid entitlements ok (global-capture + no-sandbox present)"
+if [[ -d "$APP_IN_STAGE/PlugIns/Broadcast.appex" ]]; then
+  rm -rf "$APP_IN_STAGE/PlugIns/Broadcast.appex/_CodeSignature" || true
+  ldid -S"$ROOT/Extension/Extension.entitlements" "$APP_IN_STAGE/PlugIns/Broadcast.appex/Broadcast"
 fi
 
 TIPA="$OUT_DIR/${PREFIX}-${VERSION}.tipa"

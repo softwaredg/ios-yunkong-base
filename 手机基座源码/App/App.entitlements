@@ -2,7 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- TrollStore tipa：对齐 DirectPhoneBase / screendump 私有采屏 + IOHID（非越狱、非 VNC） -->
 	<key>platform-application</key>
 	<true/>
 	<key>com.apple.private.security.no-sandbox</key>
@@ -25,7 +24,6 @@
 	<true/>
 	<key>com.apple.security.network.client</key>
 	<true/>
-	<!-- QuartzCore full-display (DirectPhoneBase LanCaptureHelper) -->
 	<key>com.apple.QuartzCore.global-capture</key>
 	<true/>
 	<key>com.apple.QuartzCore.displayable-context</key>
@@ -40,7 +38,6 @@
 	<true/>
 	<key>com.apple.private.allow-explicit-graphics-priority</key>
 	<true/>
-	<!-- Both keys present on commercial helper -->
 	<key>com.apple.security.exception.iokit-user-client-class</key>
 	<array>
 		<string>IOHIDLibUserClient</string>

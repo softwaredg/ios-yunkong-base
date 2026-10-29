@@ -321,11 +321,14 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
 - (void)onTick:(CADisplayLink *)link {
     if (!_handler || !_renderByValue || !_surface) return;
 
-    // Commercial helper skips unchanged frames via dirty count when available.
-    if (_dirtyFn) {
+    // Skip unchanged frames only AFTER we have real pixels — otherwise dirty-stall
+    // freezes blank detection / ABI rotation and we fall to snapshot forever.
+    if (_dirtyFn && _blankStreak == 0 && _haveDirty) {
         CFIndex dirty = _dirtyFn(NULL);
-        if (_haveDirty && dirty == _lastDirty) return;
+        if (dirty == _lastDirty) return;
         _lastDirty = dirty;
+    } else if (_dirtyFn) {
+        _lastDirty = _dirtyFn(NULL);
         _haveDirty = YES;
     }
 
