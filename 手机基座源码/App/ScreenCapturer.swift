@@ -65,6 +65,15 @@ final class ScreenCapturer {
         guard cap.isAvailable() else { return false }
         usingPrivate = true
         cap.setPreferredFPS(15)
+        // Empty CARender surfaces still produce H.264 traffic (black) — fall back.
+        cap.setBlankHandler { [weak self] in
+            guard let self, self.running, !self.fallbackStarted else { return }
+            self.fallbackStarted = true
+            self.onInfo?("私有采屏为空帧，改用窗口快照兜底")
+            PrivateScreenCapture.shared().stop()
+            self.usingPrivate = false
+            self.startWindowSnapshotFallback()
+        }
         cap.start(handler: { [weak self] pb, ptsUs in
             guard let self, self.running else { return }
             self.emitFrame(pb, ptsUs: ptsUs)
