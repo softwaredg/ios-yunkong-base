@@ -51,37 +51,55 @@ if [[ -f "$PLIST" ]]; then
   echo "stamped Info.plist CFBundleShortVersionString=${VERSION}"
 fi
 
-if ! command -v ldid >/dev/null 2>&1; then
-  echo "error: ldid required — tipa without private entitlements falls to 前台快照" >&2
-  exit 1
-fi
 if grep -q '<!--' "$ROOT/App/App.entitlements"; then
-  echo "error: App.entitlements has XML comments — ldid embeds empty <dict/>" >&2
+  echo "error: App.entitlements has XML comments" >&2
   exit 1
 fi
-# Normalize to XML plist (strips BOM / odd encodings that make ldid write <dict/>).
+# ASCII-only path: brew ldid has written empty <dict/> when fed paths under 手机基座源码.
 ENT_XML="$STAGE/App.entitlements.xml"
 if command -v plutil >/dev/null 2>&1; then
   plutil -convert xml1 -o "$ENT_XML" "$ROOT/App/App.entitlements"
 else
   cp "$ROOT/App/App.entitlements" "$ENT_XML"
 fi
-ldid -S"$ENT_XML" "$APP_IN_STAGE/${APP_NAME}"
-ENT_DUMP="$(ldid -e "$APP_IN_STAGE/${APP_NAME}" 2>/dev/null || true)"
-echo "ldid -e:"
+echo "entitlements file for sign: $ENT_XML"
+wc -c "$ENT_XML"
+grep -E 'global-capture|no-sandbox' "$ENT_XML" || {
+  echo "error: ENT_XML missing required keys" >&2
+  exit 1
+}
+BIN="$APP_IN_STAGE/${APP_NAME}"
+# Prefer codesign adhoc — reliable on GHA macOS; brew ldid 2.1.5 was embedding <dict/>.
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --sign - --entitlements "$ENT_XML" --generate-entitlement-der "$BIN"
+  echo "codesign adhoc done"
+else
+  echo "error: codesign not found" >&2
+  exit 1
+fi
+# Verify via codesign display (ldid -e may still be empty on codesign-signed bins).
+ENT_DUMP="$(codesign -d --entitlements :- "$BIN" 2>/dev/null || true)"
+echo "codesign entitlements dump:"
 echo "$ENT_DUMP"
 if ! printf '%s' "$ENT_DUMP" | grep -q 'global-capture'; then
-  echo "error: ldid entitlements missing QuartzCore.global-capture" >&2
+  echo "error: signed binary missing QuartzCore.global-capture" >&2
   exit 1
 fi
 if ! printf '%s' "$ENT_DUMP" | grep -q 'no-sandbox'; then
-  echo "error: ldid entitlements missing no-sandbox" >&2
+  echo "error: signed binary missing no-sandbox" >&2
   exit 1
 fi
-echo "ldid entitlements ok"
+echo "entitlements ok"
 if [[ -d "$APP_IN_STAGE/PlugIns/Broadcast.appex" ]]; then
   rm -rf "$APP_IN_STAGE/PlugIns/Broadcast.appex/_CodeSignature" || true
-  ldid -S"$ROOT/Extension/Extension.entitlements" "$APP_IN_STAGE/PlugIns/Broadcast.appex/Broadcast"
+  EXT_BIN="$APP_IN_STAGE/PlugIns/Broadcast.appex/Broadcast"
+  EXT_ENT="$STAGE/Extension.entitlements.xml"
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -convert xml1 -o "$EXT_ENT" "$ROOT/Extension/Extension.entitlements"
+  else
+    cp "$ROOT/Extension/Extension.entitlements" "$EXT_ENT"
+  fi
+  codesign --force --sign - --entitlements "$EXT_ENT" --generate-entitlement-der "$EXT_BIN"
 fi
 
 TIPA="$OUT_DIR/${PREFIX}-${VERSION}.tipa"
