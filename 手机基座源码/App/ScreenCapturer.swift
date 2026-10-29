@@ -37,10 +37,10 @@ final class ScreenCapturer {
         guard cap.isAvailable else { return false }
         usingPrivate = true
         cap.setPreferredFPS(20)
-        cap.start { [weak self] pb, ptsUs in
+        cap.start(with: { [weak self] pb, ptsUs in
             guard let self, self.running, let pb else { return }
             self.onPixelBuffer?(pb, ptsUs)
-        }
+        })
         onInfo?("已自动采屏（无弹窗）· TVH4 直推")
         return true
     }
