@@ -38,8 +38,9 @@ final class H264Encoder {
     private func startSession(width: Int32, height: Int32) throws {
         stopSessionOnly()
         var sess: VTCompressionSession?
+        // String keys — Swift constants are @available(iOS 17.4) for app extensions.
         let encSpec: [String: Any] = [
-            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: true,
+            "EnableHardwareAcceleratedVideoEncoder": true,
         ]
         let status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
@@ -68,14 +69,9 @@ final class H264Encoder {
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: targetFps as CFNumber)
         let dur = max(1, targetFps * 2) as CFNumber
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: dur)
-        // Keep encoder queue from bloating when capture outruns VT.
         let sourceOut: Int32 = 2
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: sourceOut as CFNumber)
         VTCompressionSessionPrepareToEncodeFrames(sess)
-        var hw: CFBoolean?
-        if VTSessionCopyProperty(sess, key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder, allocator: nil, valueOut: &hw) == noErr {
-            NSLog("[H264] hardware=%@", (hw == kCFBooleanTrue) ? "yes" : "no")
-        }
     }
 
     /// Latest-wins. vImage scale on encoder queue (not CG) — capture timer stays at 30Hz.
