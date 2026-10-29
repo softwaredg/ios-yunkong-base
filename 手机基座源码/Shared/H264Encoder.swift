@@ -49,16 +49,20 @@ final class H264Encoder {
     }
 
     func encode(pixelBuffer: CVPixelBuffer, ptsUs: UInt64, forceKeyframe: Bool = false) {
+        // Retain across queue hop — caller may drop its last ref as soon as encode returns.
+        let held = Unmanaged.passUnretained(pixelBuffer).retain()
+        let force = forceKeyframe
         queue.async {
+            let pb = held.takeRetainedValue()
             guard let session = self.session else { return }
             var props: CFDictionary?
-            if forceKeyframe {
+            if force {
                 props = [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary
             }
             let pts = CMTime(value: CMTimeValue(ptsUs), timescale: 1_000_000)
             VTCompressionSessionEncodeFrame(
                 session,
-                imageBuffer: pixelBuffer,
+                imageBuffer: pb,
                 presentationTimeStamp: pts,
                 duration: .invalid,
                 frameProperties: props,
