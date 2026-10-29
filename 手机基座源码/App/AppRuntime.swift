@@ -1,6 +1,5 @@
 import Foundation
 import UIKit
-import AVFoundation
 import Combine
 import Darwin
 import CoreVideo
@@ -34,10 +33,8 @@ final class AppRuntime: ObservableObject {
     private let encoder = H264Encoder()
     private let capturer = ScreenCapturer()
     private let hid: IOHIDControlling = IOHIDController()
-    private var audioPlayer: AVAudioPlayer?
-    private var audioWatchTimer: Timer?
+    private var keepAliveWatchTimer: Timer?
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
-    private var audioInterruptionObserver: NSObjectProtocol?
     private var frameCount: UInt64 = 0
     private var lastEncodedAt: Date = .distantPast
     private var lastStallRecoverAt: Date = .distantPast
@@ -74,7 +71,9 @@ final class AppRuntime: ObservableObject {
         }
         startedOnce = true
         refreshLanIP()
-        startKeepAliveAudio()
+        // No speaker audio — private process assertion keeps :11019/:5909 alive off-screen.
+        BackgroundKeepAlive.shared().start()
+        beginStickyBackgroundTask()
         startService()
         startCapture()
         ipTimer?.invalidate()
@@ -92,17 +91,20 @@ final class AppRuntime: ObservableObject {
             Task { @MainActor in self?.checkEncodeStallAndRecover() }
         }
         if let stallTimer { RunLoop.main.add(stallTimer, forMode: .common) }
-        audioWatchTimer?.invalidate()
-        audioWatchTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.ensureKeepAliveAudioPlaying() }
+        keepAliveWatchTimer?.invalidate()
+        keepAliveWatchTimer = Timer.scheduledTimer(withTimeInterval: 12, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                BackgroundKeepAlive.shared().start()
+                self?.beginStickyBackgroundTask()
+            }
         }
-        if let audioWatchTimer { RunLoop.main.add(audioWatchTimer, forMode: .common) }
+        if let keepAliveWatchTimer { RunLoop.main.add(keepAliveWatchTimer, forMode: .common) }
     }
 
     /// Called when scene becomes active / user returns to app.
     func ensureRunning(reason: String = "foreground") {
         refreshLanIP()
-        startKeepAliveAudio()
+        BackgroundKeepAlive.shared().start()
         if service == nil || !running {
             status = "自动恢复服务（\(reason)）…"
             startService()
@@ -112,9 +114,9 @@ final class AppRuntime: ObservableObject {
         }
     }
 
-    /// Keep audio session alive so iOS does not suspend :11019/:5909.
+    /// Re-assert process keep-alive when leaving the foreground (no sound).
     func enterBackground() {
-        startKeepAliveAudio()
+        BackgroundKeepAlive.shared().start()
         beginStickyBackgroundTask()
     }
 
@@ -481,84 +483,9 @@ final class AppRuntime: ObservableObject {
                     UIApplication.shared.endBackgroundTask(self.bgTask)
                     self.bgTask = .invalid
                 }
-                // Re-assert audio; without it the process freezes and LAN ports die.
-                self.startKeepAliveAudio()
+                BackgroundKeepAlive.shared().start()
                 self.beginStickyBackgroundTask()
             }
         }
-    }
-
-    private func ensureKeepAliveAudioPlaying() {
-        if audioPlayer?.isPlaying != true {
-            startKeepAliveAudio()
-        }
-    }
-
-    private func startKeepAliveAudio() {
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-            try session.setActive(true, options: [])
-            if audioInterruptionObserver == nil {
-                audioInterruptionObserver = NotificationCenter.default.addObserver(
-                    forName: AVAudioSession.interruptionNotification,
-                    object: session,
-                    queue: .main
-                ) { [weak self] note in
-                    let type = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-                    if type == AVAudioSession.InterruptionType.ended.rawValue {
-                        Task { @MainActor in self?.startKeepAliveAudio() }
-                    }
-                }
-            }
-            // volume=0: no speaker output. Non-zero PCM keeps session from looking idle
-            // (pure digital silence often gets suspended → :11019/:5909 die).
-            let wav = Self.mutedKeepAliveWavData(sampleRate: 8_000, seconds: 2)
-            let player = try AVAudioPlayer(data: wav)
-            player.numberOfLoops = -1
-            player.volume = 0
-            player.prepareToPlay()
-            guard player.play() else { return }
-            audioPlayer = player
-        } catch {
-            NSLog("[KeepAlive] audio failed: %@", error.localizedDescription)
-        }
-    }
-
-    /// Muted keep-alive WAV (volume forced to 0 at play). Tiny digital ticks only.
-    private static func mutedKeepAliveWavData(sampleRate: Int, seconds: Int) -> Data {
-        let channels = 1
-        let bitsPerSample = 16
-        let numSamples = sampleRate * seconds * channels
-        let dataSize = numSamples * (bitsPerSample / 8)
-        var data = Data(capacity: 44 + dataSize)
-        func appendASCII(_ s: String) { data.append(contentsOf: s.utf8) }
-        func appendU32(_ v: UInt32) {
-            var le = v.littleEndian
-            withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
-        }
-        func appendU16(_ v: UInt16) {
-            var le = v.littleEndian
-            withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
-        }
-        appendASCII("RIFF")
-        appendU32(UInt32(36 + dataSize))
-        appendASCII("WAVE")
-        appendASCII("fmt ")
-        appendU32(16)
-        appendU16(1) // PCM
-        appendU16(UInt16(channels))
-        appendU32(UInt32(sampleRate))
-        appendU32(UInt32(sampleRate * channels * bitsPerSample / 8))
-        appendU16(UInt16(channels * bitsPerSample / 8))
-        appendU16(UInt16(bitsPerSample))
-        appendASCII("data")
-        appendU32(UInt32(dataSize))
-        // One non-zero sample every ~0.5s so the audio pipeline stays "active".
-        for i in 0..<numSamples {
-            var sample: Int16 = (i % (sampleRate / 2) == 0) ? 1 : 0
-            withUnsafeBytes(of: &sample) { data.append(contentsOf: $0) }
-        }
-        return data
     }
 }
