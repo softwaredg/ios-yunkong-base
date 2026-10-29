@@ -30,13 +30,11 @@ final class AppRuntime: ObservableObject {
 
     private var service: LocalService?
     private let tcpVideo = TcpVideoHub()
-    private let encoder = H264Encoder()
+    private lazy var pipeline: FramePipeline = FramePipeline(tcpVideo: tcpVideo)
     private let capturer = ScreenCapturer()
     private let hid: IOHIDControlling = IOHIDController()
     private var keepAliveWatchTimer: Timer?
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
-    private var frameCount: UInt64 = 0
-    private var lastEncodedAt: Date = .distantPast
     private var lastStallRecoverAt: Date = .distantPast
     private var captureStartedAt: Date = .distantPast
     private var ipTimer: Timer?
@@ -213,9 +211,7 @@ final class AppRuntime: ObservableObject {
         status = "正在重启服务… (\(restartCount))"
         capturer.stop()
         capturing = false
-        encoder.stop()
-        frameCount = 0
-        tcpVideo.clearCachedFrames()
+        pipeline.resetEncoder()
         tcpVideo.stop()
         service?.stop()
         service = nil
@@ -309,7 +305,8 @@ final class AppRuntime: ObservableObject {
             serviceRetryTimer = nil
             let hid = hidReady ? "IOHID 就绪" : "IOHID 不可用"
             status = "已自动开服务 · TVH4 :\(TcpVideoHub.defaultPort) · 控制 :\(port) · \(hid)"
-            wireEncoder()
+            pipeline.attach(service: svc)
+            pipeline.wire()
         } catch {
             lastError = error.localizedDescription
             status = "服务启动失败，2 秒后自动重试"
@@ -361,40 +358,26 @@ final class AppRuntime: ObservableObject {
             Task { @MainActor in self?.service?.captureMode = mode.rawValue }
         }
         capturer.onPixelBuffer = { [weak self] pb, ts in
-            // ObjC may CVPixelBufferRelease as soon as this closure returns.
-            let held = Unmanaged.passUnretained(pb).retain()
-            // CADisplayLink is on main — encode sync on MainActor to cut latency.
-            if Thread.isMainThread {
-                let buffer = held.takeRetainedValue()
-                MainActor.assumeIsolated { self?.handleFrame(buffer, ts: ts) }
-            } else {
+            guard let self else { return }
+            // Encode on the capture queue — never hop to MainActor (4MB copies there ≈ 2fps).
+            CVPixelBufferRetain(pb)
+            self.pipeline.handle(pixelBuffer: pb, ptsUs: ts)
+            CVPixelBufferRelease(pb)
+            if self.pipeline.encodedFrameCount == 1 {
+                let w = CVPixelBufferGetWidth(pb)
+                let h = CVPixelBufferGetHeight(pb)
                 Task { @MainActor in
-                    let buffer = held.takeRetainedValue()
-                    self?.handleFrame(buffer, ts: ts)
+                    self.status = "推流 \(w)×\(h) · TVH4/\(TcpVideoHub.defaultPort)"
+                    self.capturing = true
                 }
             }
         }
+        pipeline.attach(service: service)
+        pipeline.wire()
         capturer.start()
         service?.captureMode = capturer.mode.rawValue
         capturing = true
         captureStartedAt = Date()
-        lastEncodedAt = .distantPast
-    }
-
-    private func wireEncoder() {
-        // Push TVH4 off the encoder queue without waiting for MainActor (avoids one-frame stall).
-        let video = tcpVideo
-        encoder.onParameterSets = { [weak self] sps, pps in
-            video.setConfiguration(TVH4.annexBConfig(sps: sps, pps: pps))
-            Task { @MainActor in self?.service?.publishConfiguration(sps: sps, pps: pps) }
-        }
-        encoder.onFrame = { [weak self] avcc, key, ts in
-            video.sendFrame(annexB: TVH4.avccToAnnexB(avcc), keyframe: key, ptsUs: ts)
-            Task { @MainActor in
-                self?.lastEncodedAt = Date()
-                self?.service?.publishFrame(avcc: avcc, keyframe: key, timestampUs: ts)
-            }
-        }
     }
 
     /// Cold start sometimes emits one IDR then stalls; soft-reset capture/encoder without dropping HTTP.
@@ -402,37 +385,20 @@ final class AppRuntime: ObservableObject {
         guard running, capturing else { return }
         let now = Date()
         guard now.timeIntervalSince(lastStallRecoverAt) >= 8 else { return }
-        let noEncodeYet = frameCount == 0 && now.timeIntervalSince(captureStartedAt) >= 3
+        let frames = pipeline.encodedFrameCount
+        let lastEnc = pipeline.lastEncodeDate
+        let noEncodeYet = frames == 0 && now.timeIntervalSince(captureStartedAt) >= 3
         let stalledAfterEncode =
-            frameCount > 0 &&
-            (lastEncodedAt == .distantPast || now.timeIntervalSince(lastEncodedAt) >= 2.5)
+            frames > 0 &&
+            (lastEnc == .distantPast || now.timeIntervalSince(lastEnc) >= 2.5)
         guard noEncodeYet || stalledAfterEncode else { return }
         lastStallRecoverAt = now
         status = "检测到推流停顿，采屏自愈…"
-        // Prefer capture-only heal (DirectPhoneBase style) before full pipeline restart.
         capturer.softHealCapture(reason: "encode-stall")
-        encoder.stop()
-        frameCount = 0
-        tcpVideo.clearCachedFrames()
-        wireEncoder()
+        pipeline.resetEncoder()
         capturing = true
         captureStartedAt = Date()
-        lastEncodedAt = .distantPast
         status = "已自愈推流 · TVH4 :\(TcpVideoHub.defaultPort)"
-    }
-
-    private func handleFrame(_ pb: CVPixelBuffer, ts: UInt64) {
-        let w = Int32(CVPixelBufferGetWidth(pb))
-        let h = Int32(CVPixelBufferGetHeight(pb))
-        service?.updateGeometry(width: Int(w), height: Int(h))
-        if frameCount == 0 {
-            try? encoder.start(width: w, height: h, fps: 30, bitrateBps: 4_000_000)
-            status = "推流 \(w)×\(h) · TVH4/\(TcpVideoHub.defaultPort)"
-            capturing = true
-        }
-        // Key every ~1s so late-joining PC windows always get a fresh IDR.
-        encoder.encode(pixelBuffer: pb, ptsUs: ts, forceKeyframe: frameCount % 30 == 0)
-        frameCount += 1
     }
 
     /// phonebase-control JSON → 开源 IOHID 全能力
