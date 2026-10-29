@@ -5,7 +5,7 @@ struct ContentView: View {
 
     private var versionLine: String {
         let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-        return "打开即推流 · 无需再点启动 · v\(ver)"
+        return "打开即推流 · 无录屏弹窗 · v\(ver)"
     }
 
     var body: some View {

@@ -1,10 +1,10 @@
 import Foundation
-import ReplayKit
 import CoreMedia
 import CoreVideo
 import UIKit
 
-/// Opens and starts capturing automatically — no Broadcast button.
+/// Prefers private QuartzCore/IOSurface capture (no ReplayKit consent alert).
+/// Falls back to key-window snapshot only if private symbols are unavailable.
 final class ScreenCapturer {
     var onPixelBuffer: ((CVPixelBuffer, UInt64) -> Void)?
     var onError: ((String) -> Void)?
@@ -12,11 +12,13 @@ final class ScreenCapturer {
 
     private var running = false
     private var snapshotTimer: Timer?
+    private var usingPrivate = false
 
     func start() {
         guard !running else { return }
         running = true
-        if startReplayKit() { return }
+        if startPrivateCapture() { return }
+        onInfo?("私有采屏不可用，改用窗口快照（仅本 App 画面）")
         startWindowSnapshotFallback()
     }
 
@@ -24,42 +26,22 @@ final class ScreenCapturer {
         running = false
         snapshotTimer?.invalidate()
         snapshotTimer = nil
-        let rec = RPScreenRecorder.shared()
-        if rec.isRecording {
-            rec.stopCapture { _ in }
+        if usingPrivate {
+            PrivateScreenCapture.shared().stop()
+            usingPrivate = false
         }
     }
 
-    private func startReplayKit() -> Bool {
-        let rec = RPScreenRecorder.shared()
-        guard rec.isAvailable else {
-            onInfo?("ReplayKit 不可用，改用窗口快照")
-            startWindowSnapshotFallback()
-            return true
+    private func startPrivateCapture() -> Bool {
+        let cap = PrivateScreenCapture.shared()
+        guard cap.isAvailable else { return false }
+        usingPrivate = true
+        cap.setPreferredFPS(20)
+        cap.start { [weak self] pb, ptsUs in
+            guard let self, self.running, let pb else { return }
+            self.onPixelBuffer?(pb, ptsUs)
         }
-        rec.isMicrophoneEnabled = false
-        rec.startCapture { [weak self] sample, type, error in
-            if let error {
-                DispatchQueue.main.async {
-                    self?.onInfo?("ReplayKit 中断：\(error.localizedDescription)，改用快照")
-                    self?.startWindowSnapshotFallback()
-                }
-                return
-            }
-            guard type == .video, let pb = CMSampleBufferGetImageBuffer(sample) else { return }
-            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-            let us = UInt64(max(0, pts.seconds * 1_000_000))
-            self?.onPixelBuffer?(pb, us)
-        } completionHandler: { [weak self] error in
-            DispatchQueue.main.async {
-                if let error {
-                    self?.onInfo?("ReplayKit 未能启动（\(error.localizedDescription)），改用快照采屏")
-                    self?.startWindowSnapshotFallback()
-                } else {
-                    self?.onInfo?("已自动采屏，电脑直接扫即可")
-                }
-            }
-        }
+        onInfo?("已自动采屏（无弹窗）· TVH4 直推")
         return true
     }
 
