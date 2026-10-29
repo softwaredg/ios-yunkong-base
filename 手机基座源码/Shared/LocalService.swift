@@ -235,6 +235,13 @@ final class LocalService {
             onRestartRequested?()
             return
         }
+        if req.method == "POST" && req.path == "/api/control/exit" {
+            req.respondJSON(["ok": true, "exiting": true])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                exit(0)
+            }
+            return
+        }
         if req.method == "POST" && req.path.hasPrefix("/api/control/memory-guard") {
             let enabled = !(req.path.contains("enabled=0"))
             memoryGuard = enabled
@@ -342,6 +349,8 @@ final class LocalService {
             "autoStart": true,
             "appVersion": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
             "captureMode": captureMode,
+            "pid": Int(ProcessInfo.processInfo.processIdentifier),
+            "helper": CommandLine.arguments.contains("--helper"),
         ]
     }
 
