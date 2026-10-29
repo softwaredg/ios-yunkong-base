@@ -41,7 +41,12 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     /// GCD timer (not CADisplayLink) — DisplayLink freezes when the app is backgrounded.
     dispatch_source_t _timer;
     dispatch_queue_t _tickQueue;
-    IOSurfaceRef _surface;
+    dispatch_queue_t _scaleQueue;
+    /// 2 native surfaces; scale queue is latest-wins so we never overwrite an in-flight slot.
+    IOSurfaceRef _surfaces[2];
+    int _surfaceIdx;
+    CVPixelBufferRef _pendingScale;
+    BOOL _scaleBusy;
     OSType _pixelFormat;
     void (^_handler)(CVPixelBufferRef, uint64_t);
     void (^_blankHandler)(void);
@@ -168,19 +173,33 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
 }
 
 - (void)releaseSurface {
-    if (_surface) {
-        CFRelease(_surface);
-        _surface = NULL;
+    for (int i = 0; i < 2; i++) {
+        if (_surfaces[i]) {
+            CFRelease(_surfaces[i]);
+            _surfaces[i] = NULL;
+        }
     }
+    _surfaceIdx = 0;
+    if (_pendingScale) {
+        CVPixelBufferRelease(_pendingScale);
+        _pendingScale = NULL;
+    }
+    _scaleBusy = NO;
 }
 
 - (BOOL)ensureSurface {
-    if (_surface) return YES;
-    _surface = _surfaceCreate((__bridge CFDictionaryRef)[self surfacePropertiesWithFormat:_pixelFormat]);
-    if (!_surface) {
-        NSLog(@"[PrivateScreenCapture] IOSurfaceCreate failed fmt=0x%08x", (unsigned)_pixelFormat);
-        return NO;
+    if (_surfaces[0] && _surfaces[1]) return YES;
+    [self releaseSurface];
+    NSDictionary *props = [self surfacePropertiesWithFormat:_pixelFormat];
+    for (int i = 0; i < 2; i++) {
+        _surfaces[i] = _surfaceCreate((__bridge CFDictionaryRef)props);
+        if (!_surfaces[i]) {
+            NSLog(@"[PrivateScreenCapture] IOSurfaceCreate failed fmt=0x%08x slot=%d", (unsigned)_pixelFormat, i);
+            [self releaseSurface];
+            return NO;
+        }
     }
+    _surfaceIdx = 0;
     _lastDirty = -1;
     _haveDirty = NO;
     return YES;
@@ -202,6 +221,9 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     if (_timer) return;
     if (!_tickQueue) {
         _tickQueue = dispatch_queue_create("psc.tick", DISPATCH_QUEUE_SERIAL);
+    }
+    if (!_scaleQueue) {
+        _scaleQueue = dispatch_queue_create("psc.scale", DISPATCH_QUEUE_SERIAL);
     }
     _timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _tickQueue);
     uint64_t interval = NSEC_PER_SEC / (uint64_t)MAX(5, _fps);
@@ -261,18 +283,19 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     else dispatch_sync(dispatch_get_main_queue(), stop);
 }
 
-- (void)renderIntoSurface {
+- (void)renderIntoSurface:(IOSurfaceRef)surface {
+    if (!surface) return;
     CFStringRef display = (_mode == PSCRenderModeByValueMain || _mode == PSCRenderModeByPtrMain)
         ? CFSTR("Main") : CFSTR("LCD");
     BOOL byPtr = (_mode == PSCRenderModeByPtrLCD || _mode == PSCRenderModeByPtrMain);
-    if (_surfaceLock) _surfaceLock(_surface, 0, NULL);
+    if (_surfaceLock) _surfaceLock(surface, 0, NULL);
     if (byPtr) {
         kern_return_t err = 0;
-        _renderByPtr(&err, display, _surface, 0, 0);
+        _renderByPtr(&err, display, surface, 0, 0);
     } else {
-        _renderByValue(0, display, _surface, 0, 0);
+        _renderByValue(0, display, surface, 0, 0);
     }
-    if (_surfaceUnlock) _surfaceUnlock(_surface, 0, NULL);
+    if (_surfaceUnlock) _surfaceUnlock(surface, 0, NULL);
 }
 
 - (BOOL)bufferLooksReal:(CVPixelBufferRef)pb {
@@ -422,6 +445,31 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     _handler(pb, ptsUs);
 }
 
+- (void)enqueueScale:(CVPixelBufferRef)wrapped {
+    // Latest-wins on scale queue (Create +1 transferred here).
+    if (_pendingScale) CVPixelBufferRelease(_pendingScale);
+    _pendingScale = wrapped;
+    if (_scaleBusy) return;
+    _scaleBusy = YES;
+    dispatch_async(_scaleQueue, ^{
+        while (YES) {
+            __block CVPixelBufferRef held = NULL;
+            dispatch_sync(self->_tickQueue, ^{
+                held = self->_pendingScale;
+                self->_pendingScale = NULL;
+                if (!held) self->_scaleBusy = NO;
+            });
+            if (!held) return;
+            CVPixelBufferRef detached = [self copyDetachedBGRA:held];
+            CVPixelBufferRelease(held);
+            if (detached) {
+                [self emitRealBuffer:detached];
+                CVPixelBufferRelease(detached);
+            }
+        }
+    });
+}
+
 - (BOOL)tryEmitUICreateScreen {
     if (!_uiCreateScreen) return NO;
     // Create-rule API (+1). ARC does not auto-release — CFBridgingRelease takes ownership.
@@ -442,7 +490,8 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     @autoreleasepool {
         // CARender first (IOSurface). UICreate only after blanks — it was preferred
         // every tick and leaked Create-rule UIImages → memory climbed past 1GB.
-        BOOL haveCARender = (_renderByValue != NULL && _surface != NULL && _pbFromSurface != NULL);
+        IOSurfaceRef surface = _surfaces[_surfaceIdx];
+        BOOL haveCARender = (_renderByValue != NULL && surface != NULL && _pbFromSurface != NULL);
         if (haveCARender) {
             // Do not skip on dirty-count — wall/focus looked like 2–3 fps when UI was quiet.
             if (_dirtyFn) {
@@ -450,22 +499,17 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
                 _haveDirty = YES;
             }
 
-            [self renderIntoSurface];
+            [self renderIntoSurface:surface];
 
             CVPixelBufferRef wrapped = NULL;
             NSDictionary *attrs = @{ (id)kCVPixelBufferIOSurfacePropertiesKey : @{} };
-            if (_pbFromSurface(kCFAllocatorDefault, _surface, (__bridge CFDictionaryRef)attrs, &wrapped) == kCVReturnSuccess && wrapped) {
+            if (_pbFromSurface(kCFAllocatorDefault, surface, (__bridge CFDictionaryRef)attrs, &wrapped) == kCVReturnSuccess && wrapped) {
                 // Full pixel scan every tick was wasteful; spot-check while streaming.
                 BOOL check = ((_looksRealCounter++ % 15) == 0) || _blankStreak > 0;
                 BOOL real = check ? [self bufferLooksReal:wrapped] : YES;
                 if (real) {
-                    // Detach before return — next tick reuses the same IOSurface.
-                    CVPixelBufferRef detached = [self copyDetachedBGRA:wrapped];
-                    CVPixelBufferRelease(wrapped);
-                    if (detached) {
-                        [self emitRealBuffer:detached];
-                        CVPixelBufferRelease(detached);
-                    }
+                    _surfaceIdx ^= 1;
+                    [self enqueueScale:wrapped]; // takes Create +1
                     return;
                 }
                 CVPixelBufferRelease(wrapped);
