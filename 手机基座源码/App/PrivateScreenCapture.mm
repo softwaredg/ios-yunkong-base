@@ -1,31 +1,44 @@
 #import "PrivateScreenCapture.h"
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
-#import <IOSurface/IOSurface.h>
 #import <CoreVideo/CoreVideo.h>
 #import <dlfcn.h>
 
+// iPhoneOS SDK often lacks public IOSurface/IOSurface.h — declare what we need.
+typedef struct __IOSurface *IOSurfaceRef;
 typedef void *IOSurfaceAcceleratorRef;
+
+typedef IOSurfaceRef (*IOSurfaceCreateFn)(CFDictionaryRef);
+typedef size_t (*IOSurfaceAlignPropertyFn)(CFStringRef, size_t);
 typedef CFIndex (*CARenderServerGetDirtyFrameCountFn)(void *);
 typedef void (*CARenderServerRenderDisplayFn)(kern_return_t, CFStringRef, IOSurfaceRef, int, int);
 typedef IOReturn (*IOSurfaceAcceleratorCreateFn)(CFAllocatorRef, void *, IOSurfaceAcceleratorRef *);
 typedef IOReturn (*IOSurfaceAcceleratorTransferSurfaceFn)(IOSurfaceAcceleratorRef, IOSurfaceRef, IOSurfaceRef, CFDictionaryRef, void *, void *, void *);
 typedef CFRunLoopSourceRef (*IOSurfaceAcceleratorGetRunLoopSourceFn)(IOSurfaceAcceleratorRef);
+typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurfaceRef, CFDictionaryRef, CVPixelBufferRef _Nullable * _Nonnull);
 
 @implementation PrivateScreenCapture {
     CADisplayLink *_link;
     IOSurfaceRef _dst;
     IOSurfaceRef _src;
     IOSurfaceAcceleratorRef _accel;
-    NSDictionary *_props;
     void (^_handler)(CVPixelBufferRef, uint64_t);
     CFIndex _lastDirty;
     NSInteger _fps;
+    IOSurfaceCreateFn _surfaceCreate;
+    IOSurfaceAlignPropertyFn _alignProp;
     CARenderServerGetDirtyFrameCountFn _dirtyFn;
     CARenderServerRenderDisplayFn _renderFn;
     IOSurfaceAcceleratorCreateFn _accelCreate;
     IOSurfaceAcceleratorTransferSurfaceFn _accelTransfer;
     IOSurfaceAcceleratorGetRunLoopSourceFn _accelSource;
+    CVPixelBufferCreateWithIOSurfaceFn _pbFromSurface;
+    CFStringRef _kBytesPerElement;
+    CFStringRef _kBytesPerRow;
+    CFStringRef _kWidth;
+    CFStringRef _kHeight;
+    CFStringRef _kPixelFormat;
+    CFStringRef _kAllocSize;
     BOOL _resolved;
     BOOL _available;
 }
@@ -49,12 +62,33 @@ typedef CFRunLoopSourceRef (*IOSurfaceAcceleratorGetRunLoopSourceFn)(IOSurfaceAc
 - (void)resolveSymbols {
     if (_resolved) return;
     _resolved = YES;
+    _surfaceCreate = (IOSurfaceCreateFn)dlsym(RTLD_DEFAULT, "IOSurfaceCreate");
+    _alignProp = (IOSurfaceAlignPropertyFn)dlsym(RTLD_DEFAULT, "IOSurfaceAlignProperty");
     _dirtyFn = (CARenderServerGetDirtyFrameCountFn)dlsym(RTLD_DEFAULT, "CARenderServerGetDirtyFrameCount");
     _renderFn = (CARenderServerRenderDisplayFn)dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay");
     _accelCreate = (IOSurfaceAcceleratorCreateFn)dlsym(RTLD_DEFAULT, "IOSurfaceAcceleratorCreate");
     _accelTransfer = (IOSurfaceAcceleratorTransferSurfaceFn)dlsym(RTLD_DEFAULT, "IOSurfaceAcceleratorTransferSurface");
     _accelSource = (IOSurfaceAcceleratorGetRunLoopSourceFn)dlsym(RTLD_DEFAULT, "IOSurfaceAcceleratorGetRunLoopSource");
-    _available = (_renderFn != NULL);
+    _pbFromSurface = (CVPixelBufferCreateWithIOSurfaceFn)dlsym(RTLD_DEFAULT, "CVPixelBufferCreateWithIOSurface");
+
+    // Resolve IOSurface property keys (they are CFString constants in the framework).
+    CFStringRef *p;
+    if ((p = (CFStringRef *)dlsym(RTLD_DEFAULT, "kIOSurfaceBytesPerElement"))) _kBytesPerElement = *p;
+    if ((p = (CFStringRef *)dlsym(RTLD_DEFAULT, "kIOSurfaceBytesPerRow"))) _kBytesPerRow = *p;
+    if ((p = (CFStringRef *)dlsym(RTLD_DEFAULT, "kIOSurfaceWidth"))) _kWidth = *p;
+    if ((p = (CFStringRef *)dlsym(RTLD_DEFAULT, "kIOSurfaceHeight"))) _kHeight = *p;
+    if ((p = (CFStringRef *)dlsym(RTLD_DEFAULT, "kIOSurfacePixelFormat"))) _kPixelFormat = *p;
+    if ((p = (CFStringRef *)dlsym(RTLD_DEFAULT, "kIOSurfaceAllocSize"))) _kAllocSize = *p;
+
+    // Fallback string keys if constants unavailable.
+    if (!_kBytesPerElement) _kBytesPerElement = CFSTR("BytesPerElement");
+    if (!_kBytesPerRow) _kBytesPerRow = CFSTR("BytesPerRow");
+    if (!_kWidth) _kWidth = CFSTR("Width");
+    if (!_kHeight) _kHeight = CFSTR("Height");
+    if (!_kPixelFormat) _kPixelFormat = CFSTR("PixelFormat");
+    if (!_kAllocSize) _kAllocSize = CFSTR("AllocSize");
+
+    _available = (_renderFn != NULL && _surfaceCreate != NULL && _pbFromSurface != NULL);
 }
 
 - (BOOL)isAvailable {
@@ -67,22 +101,27 @@ typedef CFRunLoopSourceRef (*IOSurfaceAcceleratorGetRunLoopSourceFn)(IOSurfaceAc
     int width = (int)round(MAX(px.width, 2));
     int height = (int)round(MAX(px.height, 2));
     int bytesPerElement = 4;
-    size_t bytesPerRow = IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, (size_t)bytesPerElement * (size_t)width);
+    size_t bytesPerRow = (size_t)bytesPerElement * (size_t)width;
+    if (_alignProp) {
+        bytesPerRow = _alignProp(_kBytesPerRow, bytesPerRow);
+    } else {
+        bytesPerRow = (bytesPerRow + 63) & ~((size_t)63);
+    }
     return @{
-        (id)kIOSurfaceBytesPerElement : @(bytesPerElement),
-        (id)kIOSurfaceBytesPerRow : @(bytesPerRow),
-        (id)kIOSurfaceWidth : @(width),
-        (id)kIOSurfaceHeight : @(height),
-        (id)kIOSurfacePixelFormat : @(kCVPixelFormatType_32BGRA),
-        (id)kIOSurfaceAllocSize : @(bytesPerRow * (size_t)height),
+        (__bridge id)_kBytesPerElement : @(bytesPerElement),
+        (__bridge id)_kBytesPerRow : @(bytesPerRow),
+        (__bridge id)_kWidth : @(width),
+        (__bridge id)_kHeight : @(height),
+        (__bridge id)_kPixelFormat : @(kCVPixelFormatType_32BGRA),
+        (__bridge id)_kAllocSize : @(bytesPerRow * (size_t)height),
     };
 }
 
 - (BOOL)ensureSurfaces {
     if (_dst) return YES;
-    _props = [self surfaceProperties];
-    _dst = IOSurfaceCreate((__bridge CFDictionaryRef)_props);
-    _src = IOSurfaceCreate((__bridge CFDictionaryRef)_props);
+    NSDictionary *props = [self surfaceProperties];
+    _dst = _surfaceCreate((__bridge CFDictionaryRef)props);
+    _src = _surfaceCreate((__bridge CFDictionaryRef)props);
     if (!_dst) return NO;
     if (_accelCreate && !_accel) {
         _accelCreate(kCFAllocatorDefault, NULL, &_accel);
@@ -148,7 +187,7 @@ typedef CFRunLoopSourceRef (*IOSurfaceAcceleratorGetRunLoopSourceFn)(IOSurfaceAc
 
     CVPixelBufferRef pb = NULL;
     NSDictionary *attrs = @{ (id)kCVPixelBufferIOSurfacePropertiesKey : @{} };
-    if (CVPixelBufferCreateWithIOSurface(kCFAllocatorDefault, _dst, (__bridge CFDictionaryRef)attrs, &pb) != kCVReturnSuccess || !pb) {
+    if (_pbFromSurface(kCFAllocatorDefault, _dst, (__bridge CFDictionaryRef)attrs, &pb) != kCVReturnSuccess || !pb) {
         return;
     }
     uint64_t ptsUs = (uint64_t)llround(link.timestamp * 1e6);
