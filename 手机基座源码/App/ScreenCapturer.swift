@@ -34,10 +34,10 @@ final class ScreenCapturer {
 
     private func startPrivateCapture() -> Bool {
         let cap = PrivateScreenCapture.shared()
-        guard cap.isAvailable else { return false }
+        guard cap.isAvailable() else { return false }
         usingPrivate = true
         cap.setPreferredFPS(20)
-        cap.start(with: { [weak self] pb, ptsUs in
+        cap.start(handler: { [weak self] pb, ptsUs in
             guard let self, self.running, let pb else { return }
             self.onPixelBuffer?(pb, ptsUs)
         })
