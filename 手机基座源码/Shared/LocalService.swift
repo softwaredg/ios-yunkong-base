@@ -37,6 +37,8 @@ final class LocalService {
     /// Soft-restart pipeline (HTTP + TVH4 + capture). Invoked by POST /api/control/restart.
     var onRestartRequested: (() -> Void)?
     var memoryStatsProvider: (() -> (footprint: UInt64, resident: UInt64))?
+    /// private-full | snapshot-fallback | idle — mirrors DirectPhoneBase captureBackend.
+    var captureMode: String = "idle"
 
     init(info: DeviceInfo) {
         self.info = info
@@ -339,7 +341,7 @@ final class LocalService {
             ],
             "autoStart": true,
             "appVersion": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
-            "captureMode": "private-or-snapshot",
+            "captureMode": captureMode,
         ]
     }
 
