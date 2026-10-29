@@ -3,7 +3,7 @@ import CoreMedia
 import CoreVideo
 import UIKit
 
-/// Window snapshot → TVH4. Private CARender is disabled until it stops emitting black/garbage.
+/// Prefers private full-display capture (works in background). Window snapshot is foreground fallback only.
 final class ScreenCapturer {
     var onPixelBuffer: ((CVPixelBuffer, UInt64) -> Void)?
     var onError: ((String) -> Void)?
@@ -11,13 +11,30 @@ final class ScreenCapturer {
 
     private var running = false
     private var snapshotTimer: Timer?
+    private var usingPrivate = false
     private var frameIndex: UInt64 = 0
+    private var lastPrivateFrameAt = Date.distantPast
 
     func start() {
         guard !running else { return }
         running = true
         frameIndex = 0
-        onInfo?("窗口快照推流（保证有画面）· TVH4")
+        lastPrivateFrameAt = .distantPast
+        if startPrivateCapture() {
+            onInfo?("全屏采屏（可后台）· TVH4")
+            // If private stays blank, fall back to snapshot (foreground-only).
+            Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+                guard let self, self.running, self.usingPrivate else { return }
+                if Date().timeIntervalSince(self.lastPrivateFrameAt) > 1.8 {
+                    self.onInfo?("全屏采屏无有效帧，前台改用窗口快照")
+                    PrivateScreenCapture.shared().stop()
+                    self.usingPrivate = false
+                    self.startWindowSnapshotFallback()
+                }
+            }
+            return
+        }
+        onInfo?("私有采屏不可用，窗口快照（需前台）")
         startWindowSnapshotFallback()
     }
 
@@ -25,10 +42,37 @@ final class ScreenCapturer {
         running = false
         snapshotTimer?.invalidate()
         snapshotTimer = nil
+        if usingPrivate {
+            PrivateScreenCapture.shared().stop()
+            usingPrivate = false
+        }
     }
 
     private func emitFrame(_ pb: CVPixelBuffer, ptsUs: UInt64) {
         onPixelBuffer?(pb, ptsUs)
+    }
+
+    private func startPrivateCapture() -> Bool {
+        let cap = PrivateScreenCapture.shared()
+        guard cap.isAvailable() else { return false }
+        usingPrivate = true
+        cap.setPreferredFPS(15)
+        cap.setBlankHandler { [weak self] in
+            guard let self, self.running, self.usingPrivate else { return }
+            self.onInfo?("全屏采屏为空，前台改用窗口快照")
+            PrivateScreenCapture.shared().stop()
+            self.usingPrivate = false
+            self.startWindowSnapshotFallback()
+        }
+        cap.start(handler: { [weak self] pb, ptsUs in
+            guard let self, self.running, self.usingPrivate else { return }
+            self.lastPrivateFrameAt = Date()
+            // Stop snapshot if it was running.
+            self.snapshotTimer?.invalidate()
+            self.snapshotTimer = nil
+            self.emitFrame(pb, ptsUs: ptsUs)
+        })
+        return true
     }
 
     private func startWindowSnapshotFallback() {
@@ -37,7 +81,7 @@ final class ScreenCapturer {
         let bounds = UIScreen.main.bounds
         let width = max(2, Int(bounds.width * scale))
         let height = max(2, Int(bounds.height * scale))
-        onInfo?("自动快照推流 \(width)×\(height) · 请保持 App 在前台")
+        onInfo?("窗口快照 \(width)×\(height) · 后台无法采其它 App")
         snapshotTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 12.0, repeats: true) { [weak self] _ in
             self?.captureWindow(width: width, height: height, pointSize: bounds.size, scale: scale)
         }
@@ -57,37 +101,27 @@ final class ScreenCapturer {
     }
 
     private func captureWindow(width: Int, height: Int, pointSize: CGSize, scale: CGFloat) {
-        guard running else { return }
+        guard running, !usingPrivate else { return }
         frameIndex &+= 1
         let idx = frameIndex
 
-        // Render in point space at screen scale, then copy into CVPixelBuffer.
         let format = UIGraphicsImageRendererFormat()
         format.scale = scale
         format.opaque = true
         let renderer = UIGraphicsImageRenderer(size: pointSize, format: format)
         let image = renderer.image { rc in
-            // Animated backdrop — guarantees non-constant bitstream even if hierarchy fails.
             let hue = CGFloat(idx % 90) / 90.0
             UIColor(hue: hue, saturation: 0.55, brightness: 0.35, alpha: 1).setFill()
             rc.fill(CGRect(origin: .zero, size: pointSize))
-
             if let window = self.keyWindow() {
                 window.drawHierarchy(in: CGRect(origin: .zero, size: pointSize), afterScreenUpdates: true)
             }
-
-            let title = "云控快照 #\(idx)" as NSString
+            let title = "前台快照 #\(idx)（切后台需全屏采屏）" as NSString
             let attrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.monospacedSystemFont(ofSize: 22, weight: .bold),
+                .font: UIFont.monospacedSystemFont(ofSize: 18, weight: .bold),
                 .foregroundColor: UIColor.white,
             ]
-            title.draw(at: CGPoint(x: 16, y: 48), withAttributes: attrs)
-            let sub = "TVH4 window-snapshot" as NSString
-            let subAttrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.monospacedSystemFont(ofSize: 14, weight: .medium),
-                .foregroundColor: UIColor.white.withAlphaComponent(0.9),
-            ]
-            sub.draw(at: CGPoint(x: 16, y: 78), withAttributes: subAttrs)
+            title.draw(at: CGPoint(x: 12, y: 44), withAttributes: attrs)
         }
 
         guard let cg = image.cgImage else { return }
@@ -111,10 +145,7 @@ final class ScreenCapturer {
             bytesPerRow: bytesPerRow, space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         ) else { return }
-        ctx.interpolationQuality = .none
         ctx.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
-
-        let us = UInt64(Date().timeIntervalSince1970 * 1_000_000)
-        emitFrame(pb, ptsUs: us)
+        emitFrame(pb, ptsUs: UInt64(Date().timeIntervalSince1970 * 1_000_000))
     }
 }
