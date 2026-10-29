@@ -12,17 +12,48 @@ final class TcpVideoHub {
     private var latestConfig: Data?
     private var latestKeyframe: Data?
 
+    private var listenPort: UInt16 = defaultPort
+
     func start(port: UInt16 = defaultPort) throws {
+        listenPort = port
         stop()
+        try bindListener(port: port)
+    }
+
+    private func bindListener(port: UInt16) throws {
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
         let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
         listener.newConnectionHandler = { [weak self] conn in
             self?.queue.async { self?.accept(conn) }
         }
+        listener.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                NSLog("[TVH4] TCP ready :%u", port)
+            case .failed(let err):
+                NSLog("[TVH4] TCP failed: %@ — rebind", String(describing: err))
+                self?.queue.asyncAfter(deadline: .now() + 0.4) {
+                    self?.rebind()
+                }
+            default:
+                break
+            }
+        }
         listener.start(queue: queue)
         self.listener = listener
         NSLog("[TVH4] TCP listen :%u", port)
+    }
+
+    private func rebind() {
+        listener?.cancel()
+        listener = nil
+        do {
+            try bindListener(port: listenPort)
+        } catch {
+            NSLog("[TVH4] rebind error: %@", error.localizedDescription)
+            queue.asyncAfter(deadline: .now() + 1.0) { [weak self] in self?.rebind() }
+        }
     }
 
     func stop() {
