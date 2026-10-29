@@ -18,6 +18,10 @@ typedef kern_return_t (*IOSurfaceAcceleratorCreateFn)(CFAllocatorRef, void *, IO
 typedef kern_return_t (*IOSurfaceAcceleratorTransferSurfaceFn)(IOSurfaceAcceleratorRef, IOSurfaceRef, IOSurfaceRef, CFDictionaryRef, void *, void *, void *);
 typedef CFRunLoopSourceRef (*IOSurfaceAcceleratorGetRunLoopSourceFn)(IOSurfaceAcceleratorRef);
 typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurfaceRef, CFDictionaryRef, CVPixelBufferRef _Nullable * _Nonnull);
+typedef void *(*IOSurfaceGetBaseAddressFn)(IOSurfaceRef);
+typedef size_t (*IOSurfaceGetAllocSizeFn)(IOSurfaceRef);
+typedef kern_return_t (*IOSurfaceLockFn)(IOSurfaceRef, uint32_t, uint32_t *);
+typedef kern_return_t (*IOSurfaceUnlockFn)(IOSurfaceRef, uint32_t, uint32_t *);
 
 @implementation PrivateScreenCapture {
     CADisplayLink *_link;
@@ -40,6 +44,10 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     IOSurfaceAcceleratorTransferSurfaceFn _accelTransfer;
     IOSurfaceAcceleratorGetRunLoopSourceFn _accelSource;
     CVPixelBufferCreateWithIOSurfaceFn _pbFromSurface;
+    IOSurfaceGetBaseAddressFn _surfaceBase;
+    IOSurfaceGetAllocSizeFn _surfaceAlloc;
+    IOSurfaceLockFn _surfaceLock;
+    IOSurfaceUnlockFn _surfaceUnlock;
     CFStringRef _kBytesPerElement;
     CFStringRef _kBytesPerRow;
     CFStringRef _kWidth;
@@ -81,6 +89,10 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     _accelTransfer = (IOSurfaceAcceleratorTransferSurfaceFn)dlsym(RTLD_DEFAULT, "IOSurfaceAcceleratorTransferSurface");
     _accelSource = (IOSurfaceAcceleratorGetRunLoopSourceFn)dlsym(RTLD_DEFAULT, "IOSurfaceAcceleratorGetRunLoopSource");
     _pbFromSurface = (CVPixelBufferCreateWithIOSurfaceFn)dlsym(RTLD_DEFAULT, "CVPixelBufferCreateWithIOSurface");
+    _surfaceBase = (IOSurfaceGetBaseAddressFn)dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
+    _surfaceAlloc = (IOSurfaceGetAllocSizeFn)dlsym(RTLD_DEFAULT, "IOSurfaceGetAllocSize");
+    _surfaceLock = (IOSurfaceLockFn)dlsym(RTLD_DEFAULT, "IOSurfaceLock");
+    _surfaceUnlock = (IOSurfaceUnlockFn)dlsym(RTLD_DEFAULT, "IOSurfaceUnlock");
 
     CFStringRef *p;
     if ((p = (CFStringRef *)dlsym(RTLD_DEFAULT, "kIOSurfaceBytesPerElement"))) _kBytesPerElement = *p;
@@ -185,7 +197,23 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     else dispatch_sync(dispatch_get_main_queue(), stop);
 }
 
-/// Sample BGRA for non-black content. Empty CARender surfaces encode as traffic with no picture.
+/// Magenta sentinel — if still dominant after CARender, the surface was not written.
+static const uint32_t kSentinelBGRA = 0xFF00FFFE; // A=FF B=00 G=FF R=FE
+
+- (void)fillSurfaceSentinel:(IOSurfaceRef)surface {
+    if (!surface || !_surfaceBase || !_surfaceAlloc || !_surfaceLock || !_surfaceUnlock) return;
+    if (_surfaceLock(surface, 0, NULL) != KERN_SUCCESS) return;
+    void *base = _surfaceBase(surface);
+    size_t n = _surfaceAlloc(surface);
+    if (base && n >= 4) {
+        uint32_t *p = (uint32_t *)base;
+        size_t count = n / 4;
+        for (size_t i = 0; i < count; i++) p[i] = kSentinelBGRA;
+    }
+    _surfaceUnlock(surface, 0, NULL);
+}
+
+/// True when render replaced the sentinel with real pixels (not leftover garbage / black).
 - (BOOL)pixelBufferHasContent:(CVPixelBufferRef)pb {
     if (CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return NO;
     void *base = CVPixelBufferGetBaseAddress(pb);
@@ -194,20 +222,29 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     size_t stride = CVPixelBufferGetBytesPerRow(pb);
     BOOL ok = NO;
     if (base && h > 0 && w > 0 && stride >= 4) {
-        size_t stepY = MAX((size_t)1, h / 24);
-        size_t stepX = MAX((size_t)16, (w * 4) / 32);
-        uint32_t nonzero = 0;
+        size_t stepY = MAX((size_t)1, h / 32);
+        size_t stepX = MAX((size_t)4, (w / 32) * 4);
         uint32_t samples = 0;
+        uint32_t sentinel = 0;
+        uint32_t black = 0;
+        uint32_t other = 0;
         for (size_t y = 0; y < h; y += stepY) {
             uint8_t *row = (uint8_t *)base + y * stride;
-            for (size_t x = 0; x + 3 < stride && x / 4 < w; x += stepX) {
-                // BGRA — ignore alpha; any RGB channel lit counts.
-                if (row[x] | row[x + 1] | row[x + 2]) nonzero++;
+            for (size_t x = 0; x + 3 < stride && (x / 4) < w; x += stepX) {
+                uint32_t px;
+                memcpy(&px, row + x, 4);
                 samples++;
+                if (px == kSentinelBGRA) sentinel++;
+                else if ((px & 0x00FFFFFF) == 0) black++;
+                else other++;
             }
         }
-        // Real UI has many lit samples; pure black / uncleared surface ≈ 0.
-        ok = samples > 0 && nonzero * 50 > samples; // >2% lit
+        // Real frame: most samples neither sentinel nor pure black.
+        ok = samples > 0 && other * 5 > samples; // >20% real-looking pixels
+        if (!ok) {
+            NSLog(@"[PrivateScreenCapture] empty render samples=%u sent=%u black=%u other=%u",
+                  samples, sentinel, black, other);
+        }
     }
     CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
     return ok;
@@ -241,9 +278,11 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     (void)_lastDirty;
     _ticksSinceEmit = 0;
 
-    // Direct render into destination. Optionally also try accelerator path.
+    // Paint sentinel, then render — if CARender no-ops we still see the sentinel.
+    [self fillSurfaceSentinel:_dst];
     [self renderInto:_dst];
     if (_src && _accel && _accelTransfer) {
+        [self fillSurfaceSentinel:_src];
         [self renderInto:_src];
         _accelTransfer(_accel, _src, _dst, NULL, NULL, NULL, NULL);
     }
