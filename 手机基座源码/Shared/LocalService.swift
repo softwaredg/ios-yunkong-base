@@ -80,11 +80,19 @@ final class LocalService {
         listener.newConnectionHandler = { [weak self] conn in
             self?.queue.async { self?.accept(conn) }
         }
-        // Do NOT semaphore-wait on the caller thread (often MainActor): blocking the
-        // main run loop while NWListener comes up can wedge HTTP accepts forever.
-        listener.stateUpdateHandler = { state in
-            if case .failed(let err) = state {
-                NSLog("[LocalService] listener failed: %@", String(describing: err))
+        // Do NOT semaphore-wait on MainActor (deadlocks NW). Retry bind if listen fails
+        // (common after soft-restart while the old port is still releasing).
+        listener.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                NSLog("[LocalService] HTTP ready :%u", self?.info.port ?? 0)
+            case .failed(let err):
+                NSLog("[LocalService] HTTP failed: %@ — rebind", String(describing: err))
+                self?.queue.asyncAfter(deadline: .now() + 0.4) {
+                    self?.rebindListener()
+                }
+            default:
+                break
             }
         }
         listener.start(queue: queue)
@@ -113,6 +121,40 @@ final class LocalService {
         for c in controlClients.values { c.close() }
         videoClients.removeAll()
         controlClients.removeAll()
+    }
+
+    /// Re-create the HTTP listener after a failed bind (port still releasing).
+    private func rebindListener() {
+        listener?.cancel()
+        listener = nil
+        let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
+        do {
+            let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: info.port)!)
+            listener.newConnectionHandler = { [weak self] conn in
+                self?.queue.async { self?.accept(conn) }
+            }
+            listener.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready:
+                    NSLog("[LocalService] HTTP rebind ready :%u", self?.info.port ?? 0)
+                case .failed(let err):
+                    NSLog("[LocalService] HTTP rebind failed: %@", String(describing: err))
+                    self?.queue.asyncAfter(deadline: .now() + 1.0) {
+                        self?.rebindListener()
+                    }
+                default:
+                    break
+                }
+            }
+            listener.start(queue: queue)
+            self.listener = listener
+        } catch {
+            NSLog("[LocalService] HTTP rebind throw: %@", error.localizedDescription)
+            queue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.rebindListener()
+            }
+        }
     }
 
     func publishConfiguration(sps: Data, pps: Data) {
