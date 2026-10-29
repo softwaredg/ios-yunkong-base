@@ -56,6 +56,7 @@ typedef kern_return_t (*IOSurfaceUnlockFn)(IOSurfaceRef, uint32_t, uint32_t *);
     CFStringRef _kAllocSize;
     BOOL _resolved;
     BOOL _available;
+    BOOL _sentinelReady;
 }
 
 + (instancetype)shared {
@@ -201,6 +202,7 @@ typedef kern_return_t (*IOSurfaceUnlockFn)(IOSurfaceRef, uint32_t, uint32_t *);
 static const uint32_t kSentinelBGRA = 0xFF00FFFE; // A=FF B=00 G=FF R=FE
 
 - (void)fillSurfaceSentinel:(IOSurfaceRef)surface {
+    _sentinelReady = NO;
     if (!surface || !_surfaceBase || !_surfaceAlloc || !_surfaceLock || !_surfaceUnlock) return;
     if (_surfaceLock(surface, 0, NULL) != KERN_SUCCESS) return;
     void *base = _surfaceBase(surface);
@@ -209,12 +211,15 @@ static const uint32_t kSentinelBGRA = 0xFF00FFFE; // A=FF B=00 G=FF R=FE
         uint32_t *p = (uint32_t *)base;
         size_t count = n / 4;
         for (size_t i = 0; i < count; i++) p[i] = kSentinelBGRA;
+        _sentinelReady = YES;
     }
     _surfaceUnlock(surface, 0, NULL);
 }
 
 /// True when render replaced the sentinel with real pixels (not leftover garbage / black).
 - (BOOL)pixelBufferHasContent:(CVPixelBufferRef)pb {
+    // Without a successful sentinel paint we cannot tell garbage from UI — treat as blank.
+    if (!_sentinelReady) return NO;
     if (CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return NO;
     void *base = CVPixelBufferGetBaseAddress(pb);
     size_t h = CVPixelBufferGetHeight(pb);
