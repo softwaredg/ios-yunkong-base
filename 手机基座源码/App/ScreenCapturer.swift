@@ -107,7 +107,7 @@ final class ScreenCapturer {
         let cap = PrivateScreenCapture.shared()
         guard cap.isAvailable() else { return false }
         usingPrivate = true
-        cap.setPreferredFPS(15)
+        cap.setPreferredFPS(30)
         cap.setBlankHandler { [weak self] in
             guard let self, self.running, self.usingPrivate else { return }
             self.privateHealAttempts += 1

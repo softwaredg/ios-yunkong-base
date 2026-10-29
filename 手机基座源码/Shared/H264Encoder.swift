@@ -49,36 +49,35 @@ final class H264Encoder {
         VTCompressionSessionPrepareToEncodeFrames(sess)
     }
 
-    /// Drop new frames while one encode is in flight — unbounded queue.async + copy
-    /// was retaining ~16MB/frame and climbing past 1GB.
+    /// Latest-wins (not drop-all): at most one encode + one pending copy — avoids 1GB backlog
+    /// while keeping wall/focus near capture rate instead of ~2 fps.
     private var inflight = false
+    private var pending: (CVPixelBuffer, UInt64, Bool)?
     private let inflightLock = NSLock()
 
     func encode(pixelBuffer: CVPixelBuffer, ptsUs: UInt64, forceKeyframe: Bool = false) {
+        // Private capture reuses one IOSurface each tick — copy before queue.
+        guard let copy = Self.copyPixelBuffer(pixelBuffer) else { return }
         inflightLock.lock()
-        if inflight {
-            inflightLock.unlock()
-            return
-        }
-        inflight = true
+        pending = (copy, ptsUs, forceKeyframe)
+        let start = !inflight
+        if start { inflight = true }
         inflightLock.unlock()
+        if start { queue.async { self.drainEncodeQueue() } }
+    }
 
-        // Private capture reuses one IOSurface each tick. Encoding that surface while the
-        // next render writes into it yields one IDR then silence — copy first.
-        guard let copy = Self.copyPixelBuffer(pixelBuffer) else {
+    private func drainEncodeQueue() {
+        while true {
             inflightLock.lock()
-            inflight = false
-            inflightLock.unlock()
-            return
-        }
-        let force = forceKeyframe
-        queue.async {
-            defer {
-                self.inflightLock.lock()
-                self.inflight = false
-                self.inflightLock.unlock()
+            let next = pending
+            pending = nil
+            if next == nil {
+                inflight = false
+                inflightLock.unlock()
+                return
             }
-            guard let session = self.session else { return }
+            inflightLock.unlock()
+            guard let session = session, let (copy, ptsUs, force) = next else { continue }
             var props: CFDictionary?
             if force {
                 props = [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary

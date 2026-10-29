@@ -84,7 +84,7 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
 - (instancetype)init {
     self = [super init];
     if (!self) return nil;
-    _fps = 15;
+    _fps = 30;
     _blankStreak = 0;
     _surfaceResets = 0;
     _blankNotified = NO;
@@ -414,11 +414,8 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
         // every tick and leaked Create-rule UIImages → memory climbed past 1GB.
         BOOL haveCARender = (_renderByValue != NULL && _surface != NULL && _pbFromSurface != NULL);
         if (haveCARender) {
-            if (_dirtyFn && _blankStreak == 0 && _haveDirty) {
-                CFIndex dirty = _dirtyFn(NULL);
-                if (dirty == _lastDirty) return;
-                _lastDirty = dirty;
-            } else if (_dirtyFn) {
+            // Do not skip on dirty-count — wall/focus looked like 2–3 fps when UI was quiet.
+            if (_dirtyFn) {
                 _lastDirty = _dirtyFn(NULL);
                 _haveDirty = YES;
             }
