@@ -3,6 +3,7 @@ import UIKit
 import AVFoundation
 import Combine
 import Darwin
+import CoreVideo
 
 @MainActor
 final class AppRuntime: ObservableObject {
@@ -227,7 +228,18 @@ final class AppRuntime: ObservableObject {
             }
         }
         capturer.onPixelBuffer = { [weak self] pb, ts in
-            Task { @MainActor in self?.handleFrame(pb, ts: ts) }
+            // Capture callbacks may release the CVPixelBuffer as soon as this
+            // closure returns — must retain across any async hop, or encode empty.
+            CVPixelBufferRetain(pb)
+            if Thread.isMainThread {
+                defer { CVPixelBufferRelease(pb) }
+                self?.handleFrame(pb, ts: ts)
+            } else {
+                Task { @MainActor in
+                    defer { CVPixelBufferRelease(pb) }
+                    self?.handleFrame(pb, ts: ts)
+                }
+            }
         }
         capturer.start()
         capturing = true
