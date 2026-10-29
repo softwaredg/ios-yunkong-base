@@ -12,12 +12,20 @@ final class ScreenCapturer {
 
     private var running = false
     private var snapshotTimer: Timer?
+    private var watchdogTimer: Timer?
     private var usingPrivate = false
+    private var lastFrameAt = Date.distantPast
+    private var fallbackStarted = false
 
     func start() {
         guard !running else { return }
         running = true
-        if startPrivateCapture() { return }
+        fallbackStarted = false
+        lastFrameAt = Date.distantPast
+        if startPrivateCapture() {
+            startWatchdog()
+            return
+        }
         onInfo?("私有采屏不可用，改用窗口快照（仅本 App 画面）")
         startWindowSnapshotFallback()
     }
@@ -26,20 +34,40 @@ final class ScreenCapturer {
         running = false
         snapshotTimer?.invalidate()
         snapshotTimer = nil
+        watchdogTimer?.invalidate()
+        watchdogTimer = nil
         if usingPrivate {
             PrivateScreenCapture.shared().stop()
             usingPrivate = false
         }
     }
 
+    private func emitFrame(_ pb: CVPixelBuffer, ptsUs: UInt64) {
+        lastFrameAt = Date()
+        onPixelBuffer?(pb, ptsUs)
+    }
+
+    private func startWatchdog() {
+        watchdogTimer?.invalidate()
+        watchdogTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
+            guard let self, self.running, !self.fallbackStarted else { return }
+            if Date().timeIntervalSince(self.lastFrameAt) > 1.5 {
+                self.fallbackStarted = true
+                self.onInfo?("私有采屏无帧，改用窗口快照兜底")
+                self.startWindowSnapshotFallback()
+            }
+        }
+        if let watchdogTimer { RunLoop.main.add(watchdogTimer, forMode: .common) }
+    }
+
     private func startPrivateCapture() -> Bool {
         let cap = PrivateScreenCapture.shared()
         guard cap.isAvailable() else { return false }
         usingPrivate = true
-        cap.setPreferredFPS(20)
+        cap.setPreferredFPS(15)
         cap.start(handler: { [weak self] pb, ptsUs in
             guard let self, self.running else { return }
-            self.onPixelBuffer?(pb, ptsUs)
+            self.emitFrame(pb, ptsUs: ptsUs)
         })
         onInfo?("已自动采屏（无弹窗）· TVH4 直推")
         return true
@@ -97,6 +125,6 @@ final class ScreenCapturer {
         UIGraphicsPopContext()
 
         let us = UInt64(Date().timeIntervalSince1970 * 1_000_000)
-        onPixelBuffer?(pb, us)
+        emitFrame(pb, ptsUs: us)
     }
 }
