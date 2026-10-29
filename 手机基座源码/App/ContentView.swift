@@ -17,12 +17,15 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 8) {
-                Label(runtime.running ? "服务已启动 :\(runtime.port)" : "服务未启动", systemImage: runtime.running ? "checkmark.circle.fill" : "xmark.circle")
-                    .foregroundStyle(runtime.running ? .green : .red)
+                Label(runtime.running ? "服务已自动启动 :\(runtime.port)" : "正在自动启动…", systemImage: runtime.running ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath")
+                    .foregroundStyle(runtime.running ? .green : .orange)
                 Label(runtime.capturing ? "采屏推流中" : "采屏未就绪", systemImage: runtime.capturing ? "video.fill" : "video.slash")
                     .foregroundStyle(runtime.capturing ? .green : .orange)
                 Text(runtime.status)
                     .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text("内存 \(runtime.memoryMB) MB · 自动重启 \(runtime.restartCount) 次（超 220MB）")
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
                 Text("设备：\(runtime.deviceName)")
                     .font(.footnote)

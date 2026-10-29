@@ -12,10 +12,16 @@ final class AppRuntime: ObservableObject {
     @Published var lastError: String?
     @Published var lanIP: String = "获取中…"
     @Published var hidReady = false
+    @Published var memoryMB: Int = 0
+    @Published var restartCount: Int = 0
 
     let port: UInt16 = 11019
     let deviceId: String
     let deviceName: String
+
+    /// Soft Jetsam guard — restart capture/service before iOS kills the process.
+    private let memoryLimitBytes: UInt64 = 220 * 1024 * 1024
+    private let memoryRestartCooldown: TimeInterval = 45
 
     private var service: LocalService?
     private let tcpVideo = TcpVideoHub()
@@ -24,6 +30,12 @@ final class AppRuntime: ObservableObject {
     private let hid: IOHIDControlling = IOHIDController()
     private var audioPlayer: AVAudioPlayer?
     private var frameCount: UInt64 = 0
+    private var ipTimer: Timer?
+    private var memoryTimer: Timer?
+    private var serviceRetryTimer: Timer?
+    private var lastMemoryRestartAt: Date = .distantPast
+    private var lastReason: String = ""
+    private var startedOnce = false
 
     init() {
         if let saved = UserDefaults.standard.string(forKey: "deviceId"), !saved.isEmpty {
@@ -38,16 +50,67 @@ final class AppRuntime: ObservableObject {
         hidReady = true
         PortHandoff.saveIdentity(deviceId: deviceId, deviceName: "云控基座·\(deviceName)")
         UIApplication.shared.isIdleTimerDisabled = true
+        // Don't wait for first paint — start listeners ASAP.
+        Task { @MainActor in self.autoStart() }
     }
 
     func autoStart() {
+        guard !startedOnce else {
+            ensureRunning(reason: "ensure")
+            return
+        }
+        startedOnce = true
         refreshLanIP()
         startKeepAliveAudio()
         startService()
         startCapture()
-        Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+        ipTimer?.invalidate()
+        ipTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshLanIP() }
         }
+        memoryTimer?.invalidate()
+        memoryTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkMemoryAndMaybeRestart() }
+        }
+        if let memoryTimer { RunLoop.main.add(memoryTimer, forMode: .common) }
+    }
+
+    /// Called when scene becomes active / user returns to app.
+    func ensureRunning(reason: String = "foreground") {
+        refreshLanIP()
+        if service == nil || !running {
+            status = "自动恢复服务（\(reason)）…"
+            startService()
+        }
+        if !capturing {
+            startCapture()
+        }
+    }
+
+    /// Soft restart: tear down HTTP/TVH4/encoder/capture and bring them back.
+    func restartService(reason: String) {
+        lastReason = reason
+        restartCount += 1
+        service?.updateRecovery(
+            automatic: true,
+            state: "restarting",
+            restartCount: restartCount,
+            lastReason: reason,
+            footprint: ProcessMemory.footprintBytes(),
+            resident: ProcessMemory.residentBytes()
+        )
+        status = "正在重启服务… (\(restartCount))"
+        capturer.stop()
+        capturing = false
+        encoder.stop()
+        frameCount = 0
+        tcpVideo.stop()
+        service?.stop()
+        service = nil
+        running = false
+        startService()
+        startCapture()
+        status = "已自动重启 · \(reason) · #\(restartCount)"
     }
 
     func refreshLanIP() {
@@ -77,6 +140,8 @@ final class AppRuntime: ObservableObject {
     private func startService() {
         if service != nil {
             running = true
+            serviceRetryTimer?.invalidate()
+            serviceRetryTimer = nil
             return
         }
         let screen = UIScreen.main.bounds
@@ -92,6 +157,13 @@ final class AppRuntime: ObservableObject {
             homeAvailable: true
         )
         let svc = LocalService(info: info)
+        svc.memoryLimitBytes = memoryLimitBytes
+        svc.memoryStatsProvider = {
+            (ProcessMemory.footprintBytes(), ProcessMemory.residentBytes())
+        }
+        svc.onRestartRequested = { [weak self] in
+            Task { @MainActor in self?.restartService(reason: "api-restart") }
+        }
         svc.onControlJSON = { [weak self] obj in
             self?.handleControl(obj)
         }
@@ -101,14 +173,46 @@ final class AppRuntime: ObservableObject {
             service = svc
             running = true
             lastError = nil
+            serviceRetryTimer?.invalidate()
+            serviceRetryTimer = nil
             let hid = hidReady ? "IOHID 就绪" : "IOHID 不可用"
-            status = "TVH4 :\(TcpVideoHub.defaultPort) · 控制 :\(port) · \(hid)"
+            status = "已自动开服务 · TVH4 :\(TcpVideoHub.defaultPort) · 控制 :\(port) · \(hid)"
             wireEncoder()
         } catch {
             lastError = error.localizedDescription
-            status = "服务启动失败"
+            status = "服务启动失败，2 秒后自动重试"
             running = false
+            scheduleServiceRetry()
         }
+    }
+
+    private func scheduleServiceRetry() {
+        serviceRetryTimer?.invalidate()
+        serviceRetryTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.status = "自动重试启动服务…"
+                self?.startService()
+            }
+        }
+    }
+
+    private func checkMemoryAndMaybeRestart() {
+        let footprint = ProcessMemory.footprintBytes()
+        let resident = ProcessMemory.residentBytes()
+        memoryMB = Int(max(footprint, resident) / (1024 * 1024))
+        service?.updateRecovery(
+            automatic: true,
+            state: footprint >= memoryLimitBytes ? "high" : "normal",
+            restartCount: restartCount,
+            lastReason: lastReason,
+            footprint: footprint,
+            resident: resident
+        )
+        guard footprint >= memoryLimitBytes || resident >= memoryLimitBytes else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastMemoryRestartAt) >= memoryRestartCooldown else { return }
+        lastMemoryRestartAt = now
+        restartService(reason: "memory \(memoryMB)MB≥\(memoryLimitBytes / (1024 * 1024))MB")
     }
 
     private func startCapture() {

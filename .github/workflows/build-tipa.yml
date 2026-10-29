@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "version e.g. 0.2.0"
+        description: "version e.g. 0.2.1"
         required: false
-        default: "0.2.0"
+        default: "0.2.1"
   push:
     branches: [main]
     paths:
@@ -28,7 +28,7 @@ jobs:
         id: ver
         run: |
           V="${{ github.event.inputs.version }}"
-          if [[ -z "$V" ]]; then V="0.2.0"; fi
+          if [[ -z "$V" ]]; then V="0.2.1"; fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Building version $V"
 
@@ -78,6 +78,7 @@ jobs:
           if-no-files-found: error
 
       - name: GitHub Release
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.ver.outputs.version }}
@@ -88,5 +89,5 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$TIPA" --clobber
           else
-            gh release create "$TAG" "$TIPA" --title "$TAG" --notes "TVH4 + IOHID tipa"
+            gh release create "$TAG" "$TIPA" --title "$TAG" --notes "TVH4 + IOHID tipa · auto-start · memory restart"
           fi

@@ -24,11 +24,19 @@ final class LocalService {
     private var netService: NetService?
     private var memoryGuard = true
     private var restartCount = 0
+    private var recoveryState = "normal"
+    private var lastReason = ""
+    private var footprintBytes: UInt64 = 0
+    private var residentBytes: UInt64 = 0
+    var memoryLimitBytes: UInt64 = 220 * 1024 * 1024
     private var requestedFrameRate = 0
     private var frameRate = 30
     private var bitrateMbps = 4
     var onVideoSettings: ((Int, Int) -> Void)?
     var onControlJSON: (([String: Any]) -> [String: Any]?)?
+    /// Soft-restart pipeline (HTTP + TVH4 + capture). Invoked by POST /api/control/restart.
+    var onRestartRequested: (() -> Void)?
+    var memoryStatsProvider: (() -> (footprint: UInt64, resident: UInt64))?
 
     init(info: DeviceInfo) {
         self.info = info
@@ -41,6 +49,28 @@ final class LocalService {
 
     func updateStreaming(_ streaming: Bool) {
         info.streaming = streaming
+    }
+
+    func noteRestart(reason: String) {
+        restartCount += 1
+        lastReason = reason
+        recoveryState = "restarting"
+    }
+
+    func updateRecovery(
+        automatic: Bool,
+        state: String,
+        restartCount: Int,
+        lastReason: String,
+        footprint: UInt64,
+        resident: UInt64
+    ) {
+        memoryGuard = automatic
+        recoveryState = state
+        self.restartCount = restartCount
+        self.lastReason = lastReason
+        footprintBytes = footprint
+        residentBytes = resident
     }
 
     func start() throws {
@@ -170,8 +200,9 @@ final class LocalService {
             return
         }
         if req.method == "POST" && req.path == "/api/control/restart" {
-            restartCount += 1
-            req.respondJSON(["ok": true, "restartCount": restartCount])
+            // Count bumps inside AppRuntime.restartService; respond after request accepted.
+            req.respondJSON(["ok": true, "accepted": true])
+            onRestartRequested?()
             return
         }
         if req.method == "POST" && req.path.hasPrefix("/api/control/memory-guard") {
@@ -268,16 +299,17 @@ final class LocalService {
             "captureState": info.streaming ? "capturing" : "idle",
             "videoSettings": videoSettingsJSON(),
             "memory": [
-                "serviceFootprintBytes": 48 * 1024 * 1024,
-                "serviceResidentBytes": 64 * 1024 * 1024,
+                "serviceFootprintBytes": Int(footprintBytes > 0 ? footprintBytes : (memoryStatsProvider?().footprint ?? 0)),
+                "serviceResidentBytes": Int(residentBytes > 0 ? residentBytes : (memoryStatsProvider?().resident ?? 0)),
             ],
             "recovery": [
                 "automatic": memoryGuard,
-                "state": "normal",
-                "memoryLimitBytes": 256 * 1024 * 1024,
+                "state": recoveryState,
+                "memoryLimitBytes": Int(memoryLimitBytes),
                 "restartCount": restartCount,
-                "lastReason": "",
+                "lastReason": lastReason,
             ],
+            "autoStart": true,
         ]
     }
 
