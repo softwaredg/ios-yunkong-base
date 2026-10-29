@@ -188,9 +188,12 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     if (!changed && _ticksSinceEmit < 3) return;
     _ticksSinceEmit = 0;
 
-    IOSurfaceRef renderTarget = (_src && _accel && _accelTransfer) ? _src : _dst;
-    _renderFn(0, CFSTR("LCD"), renderTarget, 0, 0);
-    if (renderTarget == _src && _src && _dst && _accel && _accelTransfer) {
+    // Prefer direct render into destination — accelerator path can silently
+    // leave an empty surface on some devices / entitlement sets.
+    _renderFn(0, CFSTR("LCD"), _dst, 0, 0);
+    if (_src && _accel && _accelTransfer) {
+        // Optional second path: render to src then copy (TrollVNC style).
+        _renderFn(0, CFSTR("LCD"), _src, 0, 0);
         _accelTransfer(_accel, _src, _dst, NULL, NULL, NULL, NULL);
     }
 
@@ -201,6 +204,7 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     }
     uint64_t ptsUs = (uint64_t)llround(link.timestamp * 1e6);
     if (ptsUs == 0) ptsUs = (uint64_t)llround(CACurrentMediaTime() * 1e6);
+    // Caller must retain if it hops off this stack before encode.
     _handler(pb, ptsUs);
     CVPixelBufferRelease(pb);
 }
