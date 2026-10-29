@@ -3,8 +3,7 @@ import CoreMedia
 import CoreVideo
 import UIKit
 
-/// Prefers private QuartzCore/IOSurface capture (no ReplayKit consent alert).
-/// Falls back to key-window snapshot only if private symbols are unavailable.
+/// Window snapshot → TVH4. Private CARender is disabled until it stops emitting black/garbage.
 final class ScreenCapturer {
     var onPixelBuffer: ((CVPixelBuffer, UInt64) -> Void)?
     var onError: ((String) -> Void)?
@@ -12,19 +11,12 @@ final class ScreenCapturer {
 
     private var running = false
     private var snapshotTimer: Timer?
-    private var watchdogTimer: Timer?
-    private var usingPrivate = false
-    private var lastFrameAt = Date.distantPast
-    private var fallbackStarted = false
+    private var frameIndex: UInt64 = 0
 
     func start() {
         guard !running else { return }
         running = true
-        fallbackStarted = true
-        lastFrameAt = Date.distantPast
-        // Private CARender currently yields garbage that still encodes (PC: traffic,
-        // no picture) and was preempting snapshot. Snapshot-only until private
-        // render is proven end-to-end.
+        frameIndex = 0
         onInfo?("窗口快照推流（保证有画面）· TVH4")
         startWindowSnapshotFallback()
     }
@@ -33,54 +25,10 @@ final class ScreenCapturer {
         running = false
         snapshotTimer?.invalidate()
         snapshotTimer = nil
-        watchdogTimer?.invalidate()
-        watchdogTimer = nil
-        if usingPrivate {
-            PrivateScreenCapture.shared().stop()
-            usingPrivate = false
-        }
     }
 
     private func emitFrame(_ pb: CVPixelBuffer, ptsUs: UInt64) {
-        lastFrameAt = Date()
         onPixelBuffer?(pb, ptsUs)
-    }
-
-    private func startWatchdog() {
-        watchdogTimer?.invalidate()
-        watchdogTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
-            guard let self, self.running, !self.fallbackStarted else { return }
-            if Date().timeIntervalSince(self.lastFrameAt) > 1.5 {
-                self.fallbackStarted = true
-                self.onInfo?("私有采屏无帧，改用窗口快照兜底")
-                self.startWindowSnapshotFallback()
-            }
-        }
-        if let watchdogTimer { RunLoop.main.add(watchdogTimer, forMode: .common) }
-    }
-
-    private func startPrivateCapture() -> Bool {
-        let cap = PrivateScreenCapture.shared()
-        guard cap.isAvailable() else { return false }
-        usingPrivate = true
-        cap.setPreferredFPS(15)
-        // Empty CARender surfaces still produce H.264 traffic (black) — fall back.
-        cap.setBlankHandler { [weak self] in
-            guard let self, self.running else { return }
-            self.onInfo?("私有采屏为空帧，已停用（保持窗口快照）")
-            PrivateScreenCapture.shared().stop()
-            self.usingPrivate = false
-        }
-        cap.start(handler: { [weak self] pb, ptsUs in
-            guard let self, self.running, self.usingPrivate else { return }
-            // Snapshot already feeds the encoder; ignore private until proven useful.
-            // (Blank frames never reach here; first real frame can later replace snapshot.)
-            self.snapshotTimer?.invalidate()
-            self.snapshotTimer = nil
-            self.fallbackStarted = true
-            self.emitFrame(pb, ptsUs: ptsUs)
-        })
-        return true
     }
 
     private func startWindowSnapshotFallback() {
@@ -89,17 +37,60 @@ final class ScreenCapturer {
         let bounds = UIScreen.main.bounds
         let width = max(2, Int(bounds.width * scale))
         let height = max(2, Int(bounds.height * scale))
-        onInfo?("自动快照推流 \(width)×\(height)（保持本 App 在前台效果最好）")
+        onInfo?("自动快照推流 \(width)×\(height) · 请保持 App 在前台")
         snapshotTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 12.0, repeats: true) { [weak self] _ in
-            self?.captureWindow(width: width, height: height)
+            self?.captureWindow(width: width, height: height, pointSize: bounds.size, scale: scale)
         }
         if let snapshotTimer {
             RunLoop.main.add(snapshotTimer, forMode: .common)
         }
     }
 
-    private func captureWindow(width: Int, height: Int) {
+    private func keyWindow() -> UIWindow? {
+        for scene in UIApplication.shared.connectedScenes {
+            guard let ws = scene as? UIWindowScene else { continue }
+            if let w = ws.windows.first(where: \.isKeyWindow) ?? ws.windows.first {
+                return w
+            }
+        }
+        return nil
+    }
+
+    private func captureWindow(width: Int, height: Int, pointSize: CGSize, scale: CGFloat) {
         guard running else { return }
+        frameIndex &+= 1
+        let idx = frameIndex
+
+        // Render in point space at screen scale, then copy into CVPixelBuffer.
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: pointSize, format: format)
+        let image = renderer.image { rc in
+            // Animated backdrop — guarantees non-constant bitstream even if hierarchy fails.
+            let hue = CGFloat(idx % 90) / 90.0
+            UIColor(hue: hue, saturation: 0.55, brightness: 0.35, alpha: 1).setFill()
+            rc.fill(CGRect(origin: .zero, size: pointSize))
+
+            if let window = self.keyWindow() {
+                window.drawHierarchy(in: CGRect(origin: .zero, size: pointSize), afterScreenUpdates: true)
+            }
+
+            let title = "云控快照 #\(idx)" as NSString
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.monospacedSystemFont(ofSize: 22, weight: .bold),
+                .foregroundColor: UIColor.white,
+            ]
+            title.draw(at: CGPoint(x: 16, y: 48), withAttributes: attrs)
+            let sub = "TVH4 window-snapshot" as NSString
+            let subAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.monospacedSystemFont(ofSize: 14, weight: .medium),
+                .foregroundColor: UIColor.white.withAlphaComponent(0.9),
+            ]
+            sub.draw(at: CGPoint(x: 16, y: 78), withAttributes: subAttrs)
+        }
+
+        guard let cg = image.cgImage else { return }
         var pb: CVPixelBuffer?
         let attrs: [String: Any] = [
             kCVPixelBufferCGImageCompatibilityKey as String: true,
@@ -120,22 +111,8 @@ final class ScreenCapturer {
             bytesPerRow: bytesPerRow, space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         ) else { return }
-
-        var window: UIWindow?
-        for scene in UIApplication.shared.connectedScenes {
-            guard let ws = scene as? UIWindowScene else { continue }
-            window = ws.windows.first(where: \.isKeyWindow) ?? ws.windows.first
-            if window != nil { break }
-        }
-        guard let window else { return }
-        UIGraphicsPushContext(ctx)
-        ctx.translateBy(x: 0, y: CGFloat(height))
-        ctx.scaleBy(x: CGFloat(width) / window.bounds.width, y: -(CGFloat(height) / window.bounds.height))
-        // Opaque backdrop so encoder never sees an empty buffer if hierarchy is blank.
-        ctx.setFillColor(UIColor.darkGray.cgColor)
-        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
-        UIGraphicsPopContext()
+        ctx.interpolationQuality = .none
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
 
         let us = UInt64(Date().timeIntervalSince1970 * 1_000_000)
         emitFrame(pb, ptsUs: us)
