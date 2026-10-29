@@ -24,6 +24,7 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
     IOSurfaceAcceleratorRef _accel;
     void (^_handler)(CVPixelBufferRef, uint64_t);
     CFIndex _lastDirty;
+    NSInteger _ticksSinceEmit;
     NSInteger _fps;
     IOSurfaceCreateFn _surfaceCreate;
     IOSurfaceAlignPropertyFn _alignProp;
@@ -53,8 +54,9 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
 - (instancetype)init {
     self = [super init];
     if (!self) return nil;
-    _fps = 20;
+    _fps = 15;
     _lastDirty = -1;
+    _ticksSinceEmit = 0;
     [self resolveSymbols];
     return self;
 }
@@ -173,11 +175,18 @@ typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurface
 - (void)onTick:(CADisplayLink *)link {
     if (!_handler || !_renderFn || !_dst) return;
 
+    // Dirty skip is an optimization only — never stall the stream. Static UI
+    // used to stop all frames after the first key, so PC saw "no traffic".
+    _ticksSinceEmit += 1;
+    BOOL changed = YES;
     if (_dirtyFn) {
         CFIndex dirty = _dirtyFn(NULL);
-        if (dirty == _lastDirty) return;
-        _lastDirty = dirty;
+        changed = (dirty != _lastDirty);
+        if (changed) _lastDirty = dirty;
     }
+    // At 15fps: force at least ~5fps even when the display claims unchanged.
+    if (!changed && _ticksSinceEmit < 3) return;
+    _ticksSinceEmit = 0;
 
     IOSurfaceRef renderTarget = (_src && _accel && _accelTransfer) ? _src : _dst;
     _renderFn(0, CFSTR("LCD"), renderTarget, 0, 0);

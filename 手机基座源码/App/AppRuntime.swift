@@ -104,6 +104,7 @@ final class AppRuntime: ObservableObject {
         capturing = false
         encoder.stop()
         frameCount = 0
+        tcpVideo.clearCachedFrames()
         tcpVideo.stop()
         service?.stop()
         service = nil
@@ -250,11 +251,12 @@ final class AppRuntime: ObservableObject {
         let h = Int32(CVPixelBufferGetHeight(pb))
         service?.updateGeometry(width: Int(w), height: Int(h))
         if frameCount == 0 {
-            try? encoder.start(width: w, height: h, fps: 20, bitrateBps: 3_000_000)
+            try? encoder.start(width: w, height: h, fps: 15, bitrateBps: 2_500_000)
             status = "推流 \(w)×\(h) · TVH4/\(TcpVideoHub.defaultPort)"
             capturing = true
         }
-        encoder.encode(pixelBuffer: pb, ptsUs: ts, forceKeyframe: frameCount % 40 == 0)
+        // Key every ~1s so late-joining PC windows always get a fresh IDR.
+        encoder.encode(pixelBuffer: pb, ptsUs: ts, forceKeyframe: frameCount % 15 == 0)
         frameCount += 1
     }
 

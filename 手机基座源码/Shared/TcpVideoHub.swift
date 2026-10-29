@@ -31,6 +31,13 @@ final class TcpVideoHub {
         for c in clients.values { c.cancel() }
         clients.removeAll()
         ready.removeAll()
+        // Keep latestConfig / latestKeyframe so a soft-restart can still seed new clients.
+    }
+
+    /// Drop cached bitstream (e.g. after encoder reset) so clients wait for a fresh IDR.
+    func clearCachedFrames() {
+        latestConfig = nil
+        latestKeyframe = nil
     }
 
     func setConfiguration(_ annexB: Data) {
