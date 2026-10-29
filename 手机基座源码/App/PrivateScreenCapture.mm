@@ -3,47 +3,58 @@
 #import <QuartzCore/QuartzCore.h>
 #import <CoreVideo/CoreVideo.h>
 #import <dlfcn.h>
+#import <string.h>
 
 typedef struct __IOSurface *IOSurfaceRef;
-typedef void *IOSurfaceAcceleratorRef;
 
 typedef IOSurfaceRef (*IOSurfaceCreateFn)(CFDictionaryRef);
-typedef size_t (*IOSurfaceAlignPropertyFn)(CFStringRef, size_t);
 typedef CFIndex (*CARenderServerGetDirtyFrameCountFn)(void *);
-// Working jailbreak samples use kern_return_t BY VALUE (pass 0), not a pointer.
-typedef void (*CARenderServerRenderDisplayFn)(kern_return_t, CFStringRef, IOSurfaceRef, int, int);
-typedef kern_return_t (*IOSurfaceAcceleratorCreateFn)(CFAllocatorRef, void *, IOSurfaceAcceleratorRef *);
-typedef kern_return_t (*IOSurfaceAcceleratorTransferSurfaceFn)(IOSurfaceAcceleratorRef, IOSurfaceRef, IOSurfaceRef, CFDictionaryRef, void *, void *, void *);
-typedef CFRunLoopSourceRef (*IOSurfaceAcceleratorGetRunLoopSourceFn)(IOSurfaceAcceleratorRef);
+/// CaptureMyScreen / DirectPhoneBase style: first arg by value.
+typedef void (*CARenderServerRenderDisplayByValueFn)(kern_return_t, CFStringRef, IOSurfaceRef, int, int);
+/// Alternate ABI seen on some iOS builds: first arg pointer.
+typedef void (*CARenderServerRenderDisplayByPtrFn)(kern_return_t *, CFStringRef, IOSurfaceRef, int, int);
 typedef CVReturn (*CVPixelBufferCreateWithIOSurfaceFn)(CFAllocatorRef, IOSurfaceRef, CFDictionaryRef, CVPixelBufferRef _Nullable * _Nonnull);
 typedef void *(*IOSurfaceGetBaseAddressFn)(IOSurfaceRef);
-typedef size_t (*IOSurfaceGetAllocSizeFn)(IOSurfaceRef);
+typedef size_t (*IOSurfaceGetBytesPerRowFn)(IOSurfaceRef);
+typedef size_t (*IOSurfaceGetWidthFn)(IOSurfaceRef);
+typedef size_t (*IOSurfaceGetHeightFn)(IOSurfaceRef);
 typedef kern_return_t (*IOSurfaceLockFn)(IOSurfaceRef, uint32_t, uint32_t *);
 typedef kern_return_t (*IOSurfaceUnlockFn)(IOSurfaceRef, uint32_t, uint32_t *);
 
-// 'ARGB' — required by CARenderServerRenderDisplay (not BGRA).
-static const OSType kSurfacePixelARGB = 0x42475241;
+// Apple fourcc 'BGRA' == 0x42475241 (same constant commercial VT paths feed into pools).
+static const OSType kFourCC_BGRA = 0x42475241;
+static const OSType kFourCC_ARGB = 0x41524742;
+
+typedef NS_ENUM(NSInteger, PSCRenderMode) {
+    PSCRenderModeByValueLCD = 0,
+    PSCRenderModeByPtrLCD,
+    PSCRenderModeByValueMain,
+    PSCRenderModeByPtrMain,
+    PSCRenderModeCount
+};
 
 @implementation PrivateScreenCapture {
     CADisplayLink *_link;
-    IOSurfaceRef _dst;
-    IOSurfaceRef _src;
-    IOSurfaceAcceleratorRef _accel;
+    IOSurfaceRef _surface;
+    OSType _pixelFormat;
     void (^_handler)(CVPixelBufferRef, uint64_t);
     void (^_blankHandler)(void);
     NSInteger _fps;
     NSInteger _blankStreak;
+    NSInteger _surfaceResets;
     BOOL _blankNotified;
+    CFIndex _lastDirty;
+    BOOL _haveDirty;
+    PSCRenderMode _mode;
     IOSurfaceCreateFn _surfaceCreate;
-    IOSurfaceAlignPropertyFn _alignProp;
     CARenderServerGetDirtyFrameCountFn _dirtyFn;
-    CARenderServerRenderDisplayFn _renderFn;
-    IOSurfaceAcceleratorCreateFn _accelCreate;
-    IOSurfaceAcceleratorTransferSurfaceFn _accelTransfer;
-    IOSurfaceAcceleratorGetRunLoopSourceFn _accelSource;
+    CARenderServerRenderDisplayByValueFn _renderByValue;
+    CARenderServerRenderDisplayByPtrFn _renderByPtr;
     CVPixelBufferCreateWithIOSurfaceFn _pbFromSurface;
     IOSurfaceGetBaseAddressFn _surfaceBase;
-    IOSurfaceGetAllocSizeFn _surfaceAlloc;
+    IOSurfaceGetBytesPerRowFn _surfaceBytesPerRow;
+    IOSurfaceGetWidthFn _surfaceWidth;
+    IOSurfaceGetHeightFn _surfaceHeight;
     IOSurfaceLockFn _surfaceLock;
     IOSurfaceUnlockFn _surfaceUnlock;
     CFStringRef _kBytesPerElement;
@@ -69,7 +80,12 @@ static const OSType kSurfacePixelARGB = 0x42475241;
     if (!self) return nil;
     _fps = 15;
     _blankStreak = 0;
+    _surfaceResets = 0;
     _blankNotified = NO;
+    _lastDirty = -1;
+    _haveDirty = NO;
+    _mode = PSCRenderModeByValueLCD;
+    _pixelFormat = kFourCC_BGRA;
     [self resolveSymbols];
     return self;
 }
@@ -78,15 +94,15 @@ static const OSType kSurfacePixelARGB = 0x42475241;
     if (_resolved) return;
     _resolved = YES;
     _surfaceCreate = (IOSurfaceCreateFn)dlsym(RTLD_DEFAULT, "IOSurfaceCreate");
-    _alignProp = (IOSurfaceAlignPropertyFn)dlsym(RTLD_DEFAULT, "IOSurfaceAlignProperty");
     _dirtyFn = (CARenderServerGetDirtyFrameCountFn)dlsym(RTLD_DEFAULT, "CARenderServerGetDirtyFrameCount");
-    _renderFn = (CARenderServerRenderDisplayFn)dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay");
-    _accelCreate = (IOSurfaceAcceleratorCreateFn)dlsym(RTLD_DEFAULT, "IOSurfaceAcceleratorCreate");
-    _accelTransfer = (IOSurfaceAcceleratorTransferSurfaceFn)dlsym(RTLD_DEFAULT, "IOSurfaceAcceleratorTransferSurface");
-    _accelSource = (IOSurfaceAcceleratorGetRunLoopSourceFn)dlsym(RTLD_DEFAULT, "IOSurfaceAcceleratorGetRunLoopSource");
+    void *render = dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay");
+    _renderByValue = (CARenderServerRenderDisplayByValueFn)render;
+    _renderByPtr = (CARenderServerRenderDisplayByPtrFn)render;
     _pbFromSurface = (CVPixelBufferCreateWithIOSurfaceFn)dlsym(RTLD_DEFAULT, "CVPixelBufferCreateWithIOSurface");
     _surfaceBase = (IOSurfaceGetBaseAddressFn)dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
-    _surfaceAlloc = (IOSurfaceGetAllocSizeFn)dlsym(RTLD_DEFAULT, "IOSurfaceGetAllocSize");
+    _surfaceBytesPerRow = (IOSurfaceGetBytesPerRowFn)dlsym(RTLD_DEFAULT, "IOSurfaceGetBytesPerRow");
+    _surfaceWidth = (IOSurfaceGetWidthFn)dlsym(RTLD_DEFAULT, "IOSurfaceGetWidth");
+    _surfaceHeight = (IOSurfaceGetHeightFn)dlsym(RTLD_DEFAULT, "IOSurfaceGetHeight");
     _surfaceLock = (IOSurfaceLockFn)dlsym(RTLD_DEFAULT, "IOSurfaceLock");
     _surfaceUnlock = (IOSurfaceUnlockFn)dlsym(RTLD_DEFAULT, "IOSurfaceUnlock");
 
@@ -107,9 +123,9 @@ static const OSType kSurfacePixelARGB = 0x42475241;
     if (!_kAllocSize) _kAllocSize = CFSTR("AllocSize");
     if (!_kIsGlobal) _kIsGlobal = CFSTR("IsGlobal");
 
-    _available = (_renderFn != NULL && _surfaceCreate != NULL && _pbFromSurface != NULL);
-    NSLog(@"[PrivateScreenCapture] available=%d render=%p surface=%p",
-          _available, _renderFn, _surfaceCreate);
+    _available = (render != NULL && _surfaceCreate != NULL && _pbFromSurface != NULL);
+    NSLog(@"[PrivateScreenCapture] available=%d render=%p format=0x%08x",
+          _available, render, (unsigned)_pixelFormat);
 }
 
 - (BOOL)isAvailable {
@@ -117,41 +133,39 @@ static const OSType kSurfacePixelARGB = 0x42475241;
     return _available;
 }
 
-- (NSDictionary *)surfaceProperties {
+- (NSDictionary *)surfacePropertiesWithFormat:(OSType)fmt {
     CGSize px = UIScreen.mainScreen.nativeBounds.size;
-    // Match CaptureMyScreen: phone framebuffer is portrait (width x height in pixels).
     int width = (int)round(MAX(px.width, 2));
     int height = (int)round(MAX(px.height, 2));
     int bytesPerElement = 4;
     size_t bytesPerRow = (size_t)bytesPerElement * (size_t)width;
-    // Do NOT over-align beyond width*4 for CARender — mismatched stride → garbage/black.
     return @{
         (__bridge id)_kIsGlobal : @YES,
         (__bridge id)_kBytesPerElement : @(bytesPerElement),
         (__bridge id)_kBytesPerRow : @(bytesPerRow),
         (__bridge id)_kWidth : @(width),
         (__bridge id)_kHeight : @(height),
-        (__bridge id)_kPixelFormat : @(kSurfacePixelARGB),
+        (__bridge id)_kPixelFormat : @(fmt),
         (__bridge id)_kAllocSize : @(bytesPerRow * (size_t)height),
     };
 }
 
-- (BOOL)ensureSurfaces {
-    if (_dst) return YES;
-    NSDictionary *props = [self surfaceProperties];
-    _dst = _surfaceCreate((__bridge CFDictionaryRef)props);
-    _src = _surfaceCreate((__bridge CFDictionaryRef)props);
-    if (!_dst) {
-        NSLog(@"[PrivateScreenCapture] IOSurfaceCreate failed");
+- (void)releaseSurface {
+    if (_surface) {
+        CFRelease(_surface);
+        _surface = NULL;
+    }
+}
+
+- (BOOL)ensureSurface {
+    if (_surface) return YES;
+    _surface = _surfaceCreate((__bridge CFDictionaryRef)[self surfacePropertiesWithFormat:_pixelFormat]);
+    if (!_surface) {
+        NSLog(@"[PrivateScreenCapture] IOSurfaceCreate failed fmt=0x%08x", (unsigned)_pixelFormat);
         return NO;
     }
-    if (_accelCreate && !_accel) {
-        _accelCreate(kCFAllocatorDefault, NULL, &_accel);
-        if (_accel && _accelSource) {
-            CFRunLoopSourceRef src = _accelSource(_accel);
-            if (src) CFRunLoopAddSource(CFRunLoopGetMain(), src, kCFRunLoopDefaultMode);
-        }
-    }
+    _lastDirty = -1;
+    _haveDirty = NO;
     return YES;
 }
 
@@ -175,13 +189,33 @@ static const OSType kSurfacePixelARGB = 0x42475241;
     if (!_available) return;
     _handler = [handler copy];
     _blankStreak = 0;
+    _surfaceResets = 0;
     _blankNotified = NO;
+    _mode = PSCRenderModeByValueLCD;
+    _pixelFormat = kFourCC_BGRA;
     void (^go)(void) = ^{
-        if (![self ensureSurfaces]) return;
+        [self releaseSurface];
+        if (![self ensureSurface]) return;
         if (self->_link) return;
         self->_link = [CADisplayLink displayLinkWithTarget:self selector:@selector(onTick:)];
         [self setPreferredFPS:self->_fps];
         [self->_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    };
+    if (NSThread.isMainThread) go();
+    else dispatch_async(dispatch_get_main_queue(), go);
+}
+
+- (void)restartSurfaces {
+    void (^go)(void) = ^{
+        self->_surfaceResets += 1;
+        // Alternate pixel format every reset (BGRA ↔ ARGB).
+        self->_pixelFormat = (self->_pixelFormat == kFourCC_BGRA) ? kFourCC_ARGB : kFourCC_BGRA;
+        self->_mode = (PSCRenderMode)(self->_surfaceResets % PSCRenderModeCount);
+        [self releaseSurface];
+        (void)[self ensureSurface];
+        self->_blankStreak = 0;
+        NSLog(@"[PrivateScreenCapture] surface reset #%ld fmt=0x%08x mode=%ld",
+              (long)self->_surfaceResets, (unsigned)self->_pixelFormat, (long)self->_mode);
     };
     if (NSThread.isMainThread) go();
     else dispatch_async(dispatch_get_main_queue(), go);
@@ -192,9 +226,24 @@ static const OSType kSurfacePixelARGB = 0x42475241;
         [self->_link invalidate];
         self->_link = nil;
         self->_handler = nil;
+        [self releaseSurface];
     };
     if (NSThread.isMainThread) stop();
     else dispatch_sync(dispatch_get_main_queue(), stop);
+}
+
+- (void)renderIntoSurface {
+    CFStringRef display = (_mode == PSCRenderModeByValueMain || _mode == PSCRenderModeByPtrMain)
+        ? CFSTR("Main") : CFSTR("LCD");
+    BOOL byPtr = (_mode == PSCRenderModeByPtrLCD || _mode == PSCRenderModeByPtrMain);
+    if (_surfaceLock) _surfaceLock(_surface, 0, NULL);
+    if (byPtr) {
+        kern_return_t err = 0;
+        _renderByPtr(&err, display, _surface, 0, 0);
+    } else {
+        _renderByValue(0, display, _surface, 0, 0);
+    }
+    if (_surfaceUnlock) _surfaceUnlock(_surface, 0, NULL);
 }
 
 - (BOOL)bufferLooksReal:(CVPixelBufferRef)pb {
@@ -225,57 +274,106 @@ static const OSType kSurfacePixelARGB = 0x42475241;
                 distinct = (uint32_t)seenN;
             }
         }
-        // Real UI: many non-black pixels AND more than 1–2 unique colors.
         ok = samples > 0 && nonzero * 10 > samples && distinct >= 3;
     }
     CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
     return ok;
 }
 
+/// Detached BGRA copy so the shared IOSurface can be rendered again immediately (commercial pool pattern).
+- (CVPixelBufferRef)copyDetachedBGRA:(CVPixelBufferRef)src {
+    size_t w = CVPixelBufferGetWidth(src);
+    size_t h = CVPixelBufferGetHeight(src);
+    NSDictionary *attrs = @{
+        (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
+        (id)kCVPixelBufferCGImageCompatibilityKey : @YES,
+        (id)kCVPixelBufferCGBitmapContextCompatibilityKey : @YES,
+    };
+    CVPixelBufferRef dst = NULL;
+    if (CVPixelBufferCreate(kCFAllocatorDefault, (int)w, (int)h, kCVPixelFormatType_32BGRA,
+                            (__bridge CFDictionaryRef)attrs, &dst) != kCVReturnSuccess || !dst) {
+        return NULL;
+    }
+    if (CVPixelBufferLockBaseAddress(src, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) {
+        CVPixelBufferRelease(dst);
+        return NULL;
+    }
+    if (CVPixelBufferLockBaseAddress(dst, 0) != kCVReturnSuccess) {
+        CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+        CVPixelBufferRelease(dst);
+        return NULL;
+    }
+    uint8_t *sBase = (uint8_t *)CVPixelBufferGetBaseAddress(src);
+    uint8_t *dBase = (uint8_t *)CVPixelBufferGetBaseAddress(dst);
+    size_t sStride = CVPixelBufferGetBytesPerRow(src);
+    size_t dStride = CVPixelBufferGetBytesPerRow(dst);
+    size_t rowBytes = MIN(sStride, dStride);
+    if (sBase && dBase) {
+        for (size_t y = 0; y < h; y++) {
+            memcpy(dBase + y * dStride, sBase + y * sStride, rowBytes);
+        }
+    }
+    CVPixelBufferUnlockBaseAddress(dst, 0);
+    CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
+    return dst;
+}
+
 - (void)onTick:(CADisplayLink *)link {
-    if (!_handler || !_renderFn || !_dst) return;
+    if (!_handler || !_renderByValue || !_surface) return;
 
-    if (_surfaceLock) _surfaceLock(_dst, 0, NULL);
-    // First arg = 0 by value (CaptureMyScreen / FastScreenshot).
-    _renderFn(0, CFSTR("LCD"), _dst, 0, 0);
-    if (_surfaceUnlock) _surfaceUnlock(_dst, 0, NULL);
-
-    // Optional accelerator path as second attempt if direct looks empty later.
-    if (_src && _accel && _accelTransfer) {
-        if (_surfaceLock) _surfaceLock(_src, 0, NULL);
-        _renderFn(0, CFSTR("LCD"), _src, 0, 0);
-        if (_surfaceUnlock) _surfaceUnlock(_src, 0, NULL);
-        _accelTransfer(_accel, _src, _dst, NULL, NULL, NULL, NULL);
+    // Commercial helper skips unchanged frames via dirty count when available.
+    if (_dirtyFn) {
+        CFIndex dirty = _dirtyFn(NULL);
+        if (_haveDirty && dirty == _lastDirty) return;
+        _lastDirty = dirty;
+        _haveDirty = YES;
     }
 
-    CVPixelBufferRef pb = NULL;
+    [self renderIntoSurface];
+
+    CVPixelBufferRef wrapped = NULL;
     NSDictionary *attrs = @{ (id)kCVPixelBufferIOSurfacePropertiesKey : @{} };
-    if (_pbFromSurface(kCFAllocatorDefault, _dst, (__bridge CFDictionaryRef)attrs, &pb) != kCVReturnSuccess || !pb) {
+    if (_pbFromSurface(kCFAllocatorDefault, _surface, (__bridge CFDictionaryRef)attrs, &wrapped) != kCVReturnSuccess || !wrapped) {
         return;
     }
 
-    if (![self bufferLooksReal:pb]) {
+    if (![self bufferLooksReal:wrapped]) {
         _blankStreak++;
-        CVPixelBufferRelease(pb);
-        if (_blankStreak >= 15 && !_blankNotified) {
+        CVPixelBufferRelease(wrapped);
+        // Rotate render ABI / display name while still blank.
+        if (_blankStreak > 0 && (_blankStreak % 8) == 0) {
+            _mode = (PSCRenderMode)((_mode + 1) % PSCRenderModeCount);
+        }
+        // Recreate IOSurface a few times (format flip) before declaring failure.
+        if (_blankStreak == 20 || _blankStreak == 40 || _blankStreak == 60) {
+            [self restartSurfaces];
+        }
+        if (_blankStreak >= 90 && !_blankNotified) {
             _blankNotified = YES;
-            NSLog(@"[PrivateScreenCapture] still blank after ARGB fix — fallback");
+            NSLog(@"[PrivateScreenCapture] blank after resets — notify fallback");
             if (_blankHandler) _blankHandler();
         }
         return;
     }
+
+    if (_blankStreak > 0) {
+        NSLog(@"[PrivateScreenCapture] got real frames mode=%ld fmt=0x%08x",
+              (long)_mode, (unsigned)_pixelFormat);
+    }
     _blankStreak = 0;
+
+    CVPixelBufferRef detached = [self copyDetachedBGRA:wrapped];
+    CVPixelBufferRelease(wrapped);
+    if (!detached) return;
 
     uint64_t ptsUs = (uint64_t)llround(link.timestamp * 1e6);
     if (ptsUs == 0) ptsUs = (uint64_t)llround(CACurrentMediaTime() * 1e6);
-    _handler(pb, ptsUs);
-    CVPixelBufferRelease(pb);
+    _handler(detached, ptsUs);
+    CVPixelBufferRelease(detached);
 }
 
 - (void)dealloc {
     [self stop];
-    if (_dst) CFRelease(_dst);
-    if (_src) CFRelease(_src);
 }
 
 @end
