@@ -261,6 +261,9 @@ final class AppRuntime: ObservableObject {
                 self?.capturing = false
             }
         }
+        capturer.onModeChange = { [weak self] mode in
+            Task { @MainActor in self?.service?.captureMode = mode.rawValue }
+        }
         capturer.onPixelBuffer = { [weak self] pb, ts in
             // ObjC may CVPixelBufferRelease as soon as this closure returns.
             let held = Unmanaged.passUnretained(pb).retain()
@@ -276,6 +279,7 @@ final class AppRuntime: ObservableObject {
             }
         }
         capturer.start()
+        service?.captureMode = capturer.mode.rawValue
         capturing = true
         captureStartedAt = Date()
         lastEncodedAt = .distantPast
@@ -308,15 +312,17 @@ final class AppRuntime: ObservableObject {
             (lastEncodedAt == .distantPast || now.timeIntervalSince(lastEncodedAt) >= 2.5)
         guard noEncodeYet || stalledAfterEncode else { return }
         lastStallRecoverAt = now
-        status = "检测到推流停顿，自动恢复…"
-        capturer.stop()
-        capturing = false
+        status = "检测到推流停顿，采屏自愈…"
+        // Prefer capture-only heal (DirectPhoneBase style) before full pipeline restart.
+        capturer.softHealCapture(reason: "encode-stall")
         encoder.stop()
         frameCount = 0
         tcpVideo.clearCachedFrames()
         wireEncoder()
-        startCapture()
-        status = "已自动恢复推流 · TVH4 :\(TcpVideoHub.defaultPort)"
+        capturing = true
+        captureStartedAt = Date()
+        lastEncodedAt = .distantPast
+        status = "已自愈推流 · TVH4 :\(TcpVideoHub.defaultPort)"
     }
 
     private func handleFrame(_ pb: CVPixelBuffer, ts: UInt64) {
