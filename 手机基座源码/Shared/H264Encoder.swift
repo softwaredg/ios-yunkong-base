@@ -1,6 +1,7 @@
 import Foundation
 import VideoToolbox
 import CoreMedia
+import CoreVideo
 
 /// VideoToolbox H.264 encoder → AVCC length-prefixed NALs (+ SPS/PPS for TVH4 config).
 final class H264Encoder {
@@ -49,27 +50,76 @@ final class H264Encoder {
     }
 
     func encode(pixelBuffer: CVPixelBuffer, ptsUs: UInt64, forceKeyframe: Bool = false) {
-        // Retain across queue hop — caller may drop its last ref as soon as encode returns.
-        let held = Unmanaged.passUnretained(pixelBuffer).retain()
+        // Private capture reuses one IOSurface each tick. Encoding that surface while the
+        // next render writes into it yields one IDR then silence — copy first.
+        guard let copy = Self.copyPixelBuffer(pixelBuffer) else { return }
         let force = forceKeyframe
         queue.async {
-            let pb = held.takeRetainedValue()
             guard let session = self.session else { return }
             var props: CFDictionary?
             if force {
                 props = [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary
             }
             let pts = CMTime(value: CMTimeValue(ptsUs), timescale: 1_000_000)
-            VTCompressionSessionEncodeFrame(
+            let st = VTCompressionSessionEncodeFrame(
                 session,
-                imageBuffer: pb,
+                imageBuffer: copy,
                 presentationTimeStamp: pts,
                 duration: .invalid,
                 frameProperties: props,
                 sourceFrameRefcon: nil,
                 infoFlagsOut: nil
             )
+            if st != noErr {
+                NSLog("[H264] EncodeFrame status=%d", st)
+            }
         }
+    }
+
+    /// Independent CPU copy so the capture IOSurface can be rendered again immediately.
+    private static func copyPixelBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
+        let w = CVPixelBufferGetWidth(src)
+        let h = CVPixelBufferGetHeight(src)
+        let fmt = CVPixelBufferGetPixelFormatType(src)
+        var dst: CVPixelBuffer?
+        let attrs: [String: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any],
+        ]
+        guard CVPixelBufferCreate(
+            kCFAllocatorDefault, w, h, fmt, attrs as CFDictionary, &dst
+        ) == kCVReturnSuccess, let dst else { return nil }
+
+        CVPixelBufferLockBaseAddress(src, .readOnly)
+        CVPixelBufferLockBaseAddress(dst, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(src, .readOnly)
+            CVPixelBufferUnlockBaseAddress(dst, [])
+        }
+
+        let planeCount = CVPixelBufferGetPlaneCount(src)
+        if planeCount <= 1 {
+            guard let s = CVPixelBufferGetBaseAddress(src),
+                  let d = CVPixelBufferGetBaseAddress(dst) else { return nil }
+            let srcRow = CVPixelBufferGetBytesPerRow(src)
+            let dstRow = CVPixelBufferGetBytesPerRow(dst)
+            let rowBytes = min(srcRow, dstRow)
+            for y in 0..<h {
+                memcpy(d.advanced(by: y * dstRow), s.advanced(by: y * srcRow), rowBytes)
+            }
+        } else {
+            for p in 0..<planeCount {
+                guard let s = CVPixelBufferGetBaseAddressOfPlane(src, p),
+                      let d = CVPixelBufferGetBaseAddressOfPlane(dst, p) else { return nil }
+                let ph = CVPixelBufferGetHeightOfPlane(src, p)
+                let srcRow = CVPixelBufferGetBytesPerRowOfPlane(src, p)
+                let dstRow = CVPixelBufferGetBytesPerRowOfPlane(dst, p)
+                let rowBytes = min(srcRow, dstRow)
+                for y in 0..<ph {
+                    memcpy(d.advanced(by: y * dstRow), s.advanced(by: y * srcRow), rowBytes)
+                }
+            }
+        }
+        return dst
     }
 
     func stop() {
