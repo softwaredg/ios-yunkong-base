@@ -11,8 +11,13 @@ struct IOSYunKongBaseApp: App {
                 .environmentObject(runtime)
                 .onAppear { runtime.autoStart() }
                 .onChange(of: scenePhase) { newPhase in
-                    if newPhase == .active {
+                    switch newPhase {
+                    case .active:
                         runtime.ensureRunning(reason: "foreground")
+                    case .inactive, .background:
+                        runtime.enterBackground()
+                    @unknown default:
+                        break
                     }
                 }
         }

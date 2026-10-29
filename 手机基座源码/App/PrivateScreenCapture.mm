@@ -37,7 +37,9 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
 };
 
 @implementation PrivateScreenCapture {
-    CADisplayLink *_link;
+    /// GCD timer (not CADisplayLink) — DisplayLink freezes when the app is backgrounded.
+    dispatch_source_t _timer;
+    dispatch_queue_t _tickQueue;
     IOSurfaceRef _surface;
     OSType _pixelFormat;
     void (^_handler)(CVPixelBufferRef, uint64_t);
@@ -182,17 +184,27 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
 
 - (void)setPreferredFPS:(NSInteger)fps {
     _fps = MAX(5, MIN(60, fps));
-    if (_link) {
-        if (@available(iOS 15.0, *)) {
-            _link.preferredFrameRateRange = CAFrameRateRangeMake((float)_fps, (float)_fps, (float)_fps);
-        } else {
-            _link.preferredFramesPerSecond = (int)_fps;
-        }
+    if (_timer) {
+        uint64_t interval = NSEC_PER_SEC / (uint64_t)_fps;
+        dispatch_source_set_timer(_timer, DISPATCH_TIME_NOW, interval, interval / 5);
     }
 }
 
 - (void)setBlankHandler:(void (^)(void))handler {
     _blankHandler = [handler copy];
+}
+
+- (void)startTickTimer {
+    if (_timer) return;
+    if (!_tickQueue) {
+        _tickQueue = dispatch_queue_create("psc.tick", DISPATCH_QUEUE_SERIAL);
+    }
+    _timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _tickQueue);
+    uint64_t interval = NSEC_PER_SEC / (uint64_t)MAX(5, _fps);
+    dispatch_source_set_timer(_timer, DISPATCH_TIME_NOW, interval, interval / 5);
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(_timer, ^{ [weakSelf onTick]; });
+    dispatch_resume(_timer);
 }
 
 - (void)startWithHandler:(void (^)(CVPixelBufferRef, uint64_t))handler {
@@ -210,10 +222,7 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
         if (self->_renderByValue && self->_surfaceCreate) {
             (void)[self ensureSurface];
         }
-        if (self->_link) return;
-        self->_link = [CADisplayLink displayLinkWithTarget:self selector:@selector(onTick:)];
-        [self setPreferredFPS:self->_fps];
-        [self->_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+        [self startTickTimer];
     };
     if (NSThread.isMainThread) go();
     else dispatch_async(dispatch_get_main_queue(), go);
@@ -237,8 +246,10 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
 
 - (void)stop {
     void (^stop)(void) = ^{
-        [self->_link invalidate];
-        self->_link = nil;
+        if (self->_timer) {
+            dispatch_source_cancel(self->_timer);
+            self->_timer = nil;
+        }
         self->_handler = nil;
         [self releaseSurface];
     };
@@ -371,25 +382,24 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     return pb;
 }
 
-- (void)emitRealBuffer:(CVPixelBufferRef)pb link:(CADisplayLink *)link {
+- (void)emitRealBuffer:(CVPixelBufferRef)pb {
     if (_blankStreak > 0) {
         NSLog(@"[PrivateScreenCapture] got real frames mode=%ld ui=%d",
               (long)_mode, _uiCreateScreen != NULL);
     }
     _blankStreak = 0;
-    uint64_t ptsUs = (uint64_t)llround(link.timestamp * 1e6);
-    if (ptsUs == 0) ptsUs = (uint64_t)llround(CACurrentMediaTime() * 1e6);
+    uint64_t ptsUs = (uint64_t)llround(CACurrentMediaTime() * 1e6);
     _handler(pb, ptsUs);
 }
 
-- (BOOL)tryEmitUICreateScreen:(CADisplayLink *)link {
+- (BOOL)tryEmitUICreateScreen {
     if (!_uiCreateScreen) return NO;
     // Create-rule API (+1). ARC does not auto-release — CFBridgingRelease takes ownership.
     UIImage *shot = CFBridgingRelease(_uiCreateScreen());
     if (!shot) return NO;
     CVPixelBufferRef fromUI = [self pixelBufferFromUIImage:shot];
     if (fromUI && [self bufferLooksReal:fromUI]) {
-        [self emitRealBuffer:fromUI link:link];
+        [self emitRealBuffer:fromUI];
         CVPixelBufferRelease(fromUI);
         return YES;
     }
@@ -397,7 +407,7 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     return NO;
 }
 
-- (void)onTick:(CADisplayLink *)link {
+- (void)onTick {
     if (!_handler) return;
     @autoreleasepool {
         // CARender first (IOSurface). UICreate only after blanks — it was preferred
@@ -420,7 +430,7 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
             if (_pbFromSurface(kCFAllocatorDefault, _surface, (__bridge CFDictionaryRef)attrs, &wrapped) == kCVReturnSuccess && wrapped) {
                 if ([self bufferLooksReal:wrapped]) {
                     // Do NOT copyDetached here — H264Encoder copies once. Double-copy blew RAM.
-                    [self emitRealBuffer:wrapped link:link];
+                    [self emitRealBuffer:wrapped];
                     CVPixelBufferRelease(wrapped);
                     return;
                 }
@@ -435,7 +445,7 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
                 [self restartSurfaces];
             }
             // After sustained blank, try UICreate once per tick as fallback.
-            if (_blankStreak >= 8 && [self tryEmitUICreateScreen:link]) return;
+            if (_blankStreak >= 8 && [self tryEmitUICreateScreen]) return;
             if (_blankStreak >= 90 && !_blankNotified) {
                 _blankNotified = YES;
                 NSLog(@"[PrivateScreenCapture] blank after resets — notify fallback");
@@ -444,7 +454,7 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
             return;
         }
 
-        if ([self tryEmitUICreateScreen:link]) return;
+        if ([self tryEmitUICreateScreen]) return;
 
         _blankStreak++;
         if (_blankStreak >= 90 && !_blankNotified) {
