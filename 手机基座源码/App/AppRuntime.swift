@@ -36,8 +36,12 @@ final class AppRuntime: ObservableObject {
     private let hid: IOHIDControlling = IOHIDController()
     private var audioPlayer: AVAudioPlayer?
     private var frameCount: UInt64 = 0
+    private var lastEncodedAt: Date = .distantPast
+    private var lastStallRecoverAt: Date = .distantPast
+    private var captureStartedAt: Date = .distantPast
     private var ipTimer: Timer?
     private var memoryTimer: Timer?
+    private var stallTimer: Timer?
     private var serviceRetryTimer: Timer?
     private var lastMemoryRestartAt: Date = .distantPast
     private var lastReason: String = ""
@@ -79,6 +83,11 @@ final class AppRuntime: ObservableObject {
             Task { @MainActor in self?.checkMemoryAndMaybeRestart() }
         }
         if let memoryTimer { RunLoop.main.add(memoryTimer, forMode: .common) }
+        stallTimer?.invalidate()
+        stallTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkEncodeStallAndRecover() }
+        }
+        if let stallTimer { RunLoop.main.add(stallTimer, forMode: .common) }
     }
 
     /// Called when scene becomes active / user returns to app.
@@ -268,6 +277,8 @@ final class AppRuntime: ObservableObject {
         }
         capturer.start()
         capturing = true
+        captureStartedAt = Date()
+        lastEncodedAt = .distantPast
     }
 
     private func wireEncoder() {
@@ -280,9 +291,32 @@ final class AppRuntime: ObservableObject {
         encoder.onFrame = { [weak self] avcc, key, ts in
             video.sendFrame(annexB: TVH4.avccToAnnexB(avcc), keyframe: key, ptsUs: ts)
             Task { @MainActor in
+                self?.lastEncodedAt = Date()
                 self?.service?.publishFrame(avcc: avcc, keyframe: key, timestampUs: ts)
             }
         }
+    }
+
+    /// Cold start sometimes emits one IDR then stalls; soft-reset capture/encoder without dropping HTTP.
+    private func checkEncodeStallAndRecover() {
+        guard running, capturing else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastStallRecoverAt) >= 8 else { return }
+        let noEncodeYet = frameCount == 0 && now.timeIntervalSince(captureStartedAt) >= 3
+        let stalledAfterEncode =
+            frameCount > 0 &&
+            (lastEncodedAt == .distantPast || now.timeIntervalSince(lastEncodedAt) >= 2.5)
+        guard noEncodeYet || stalledAfterEncode else { return }
+        lastStallRecoverAt = now
+        status = "检测到推流停顿，自动恢复…"
+        capturer.stop()
+        capturing = false
+        encoder.stop()
+        frameCount = 0
+        tcpVideo.clearCachedFrames()
+        wireEncoder()
+        startCapture()
+        status = "已自动恢复推流 · TVH4 :\(TcpVideoHub.defaultPort)"
     }
 
     private func handleFrame(_ pb: CVPixelBuffer, ts: UInt64) {
