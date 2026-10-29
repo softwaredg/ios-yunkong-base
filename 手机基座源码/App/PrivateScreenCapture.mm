@@ -379,7 +379,7 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
     };
     Pixel_8888 bg = {0, 0, 0, 0};
     uint8_t rot = cw ? kRotate90DegreesClockwise : kRotate270DegreesClockwise;
-    vImage_Error err = vImageRotate90_ARGB8888(&sbuf, &dbuf, NULL, rot, bg, kvImageNoFlags);
+    vImage_Error err = vImageRotate90_ARGB8888(&sbuf, &dbuf, rot, bg, kvImageNoFlags);
     CVPixelBufferUnlockBaseAddress(dst, 0);
     CVPixelBufferUnlockBaseAddress(src, kCVPixelBufferLock_ReadOnly);
     if (err != kvImageNoError) {
