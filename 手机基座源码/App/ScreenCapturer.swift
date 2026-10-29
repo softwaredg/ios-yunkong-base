@@ -3,35 +3,42 @@ import CoreMedia
 import CoreVideo
 import UIKit
 
-/// Prefers private full-display capture (works in background). Window snapshot is foreground fallback only.
+/// Prefers private full-display capture (DirectPhoneBase / CARender path).
+/// Window snapshot is last-resort foreground-only fallback — never the product path.
 final class ScreenCapturer {
+    enum Mode: String {
+        case privateFull = "private-full"
+        case snapshotFallback = "snapshot-fallback"
+        case idle = "idle"
+    }
+
     var onPixelBuffer: ((CVPixelBuffer, UInt64) -> Void)?
     var onError: ((String) -> Void)?
     var onInfo: ((String) -> Void)?
+    var onModeChange: ((Mode) -> Void)?
+
+    private(set) var mode: Mode = .idle {
+        didSet { if oldValue != mode { onModeChange?(mode) } }
+    }
 
     private var running = false
     private var snapshotTimer: Timer?
     private var usingPrivate = false
     private var frameIndex: UInt64 = 0
     private var lastPrivateFrameAt = Date.distantPast
+    private var privateHealAttempts = 0
 
     func start() {
         guard !running else { return }
         running = true
         frameIndex = 0
         lastPrivateFrameAt = .distantPast
+        privateHealAttempts = 0
         if startPrivateCapture() {
-            onInfo?("全屏采屏（可后台）· TVH4")
-            // If private stays blank, fall back to snapshot (foreground-only).
-            Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
-                guard let self, self.running, self.usingPrivate else { return }
-                if Date().timeIntervalSince(self.lastPrivateFrameAt) > 1.8 {
-                    self.onInfo?("全屏采屏无有效帧，前台改用窗口快照")
-                    PrivateScreenCapture.shared().stop()
-                    self.usingPrivate = false
-                    self.startWindowSnapshotFallback()
-                }
-            }
+            mode = .privateFull
+            onInfo?("全屏采屏（可后台）· Direct 路线 · TVH4")
+            // Give private path longer to settle; heal surfaces before snapshot fallback.
+            schedulePrivateWatchdog()
             return
         }
         onInfo?("私有采屏不可用，窗口快照（需前台）")
@@ -46,10 +53,54 @@ final class ScreenCapturer {
             PrivateScreenCapture.shared().stop()
             usingPrivate = false
         }
+        mode = .idle
+    }
+
+    /// Soft-heal capture only (no HTTP/TVH4 tear-down) — mirrors LanCaptureHelper restart.
+    func softHealCapture(reason: String) {
+        guard running else { return }
+        onInfo?("采屏自愈：\(reason)")
+        snapshotTimer?.invalidate()
+        snapshotTimer = nil
+        if usingPrivate {
+            PrivateScreenCapture.shared().restartSurfaces()
+            lastPrivateFrameAt = .distantPast
+            schedulePrivateWatchdog()
+            mode = .privateFull
+            return
+        }
+        PrivateScreenCapture.shared().stop()
+        usingPrivate = false
+        if startPrivateCapture() {
+            mode = .privateFull
+            onInfo?("全屏采屏已恢复 · TVH4")
+            schedulePrivateWatchdog()
+        } else {
+            startWindowSnapshotFallback()
+        }
     }
 
     private func emitFrame(_ pb: CVPixelBuffer, ptsUs: UInt64) {
         onPixelBuffer?(pb, ptsUs)
+    }
+
+    private func schedulePrivateWatchdog() {
+        Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
+            guard let self, self.running, self.usingPrivate else { return }
+            if Date().timeIntervalSince(self.lastPrivateFrameAt) > 2.5 {
+                self.privateHealAttempts += 1
+                if self.privateHealAttempts <= 3 {
+                    self.onInfo?("全屏无帧，重建 IOSurface（#\(self.privateHealAttempts)）")
+                    PrivateScreenCapture.shared().restartSurfaces()
+                    self.schedulePrivateWatchdog()
+                    return
+                }
+                self.onInfo?("全屏采屏仍无帧，前台改用窗口快照")
+                PrivateScreenCapture.shared().stop()
+                self.usingPrivate = false
+                self.startWindowSnapshotFallback()
+            }
+        }
     }
 
     private func startPrivateCapture() -> Bool {
@@ -59,6 +110,13 @@ final class ScreenCapturer {
         cap.setPreferredFPS(15)
         cap.setBlankHandler { [weak self] in
             guard let self, self.running, self.usingPrivate else { return }
+            self.privateHealAttempts += 1
+            if self.privateHealAttempts <= 3 {
+                self.onInfo?("全屏空帧，重建采屏（#\(self.privateHealAttempts)）")
+                PrivateScreenCapture.shared().restartSurfaces()
+                self.schedulePrivateWatchdog()
+                return
+            }
             self.onInfo?("全屏采屏为空，前台改用窗口快照")
             PrivateScreenCapture.shared().stop()
             self.usingPrivate = false
@@ -67,15 +125,17 @@ final class ScreenCapturer {
         cap.start(handler: { [weak self] pb, ptsUs in
             guard let self, self.running, self.usingPrivate else { return }
             self.lastPrivateFrameAt = Date()
-            // Stop snapshot if it was running.
+            self.privateHealAttempts = 0
             self.snapshotTimer?.invalidate()
             self.snapshotTimer = nil
+            if self.mode != .privateFull { self.mode = .privateFull }
             self.emitFrame(pb, ptsUs: ptsUs)
         })
         return true
     }
 
     private func startWindowSnapshotFallback() {
+        mode = .snapshotFallback
         snapshotTimer?.invalidate()
         let scale = UIScreen.main.scale
         let bounds = UIScreen.main.bounds
