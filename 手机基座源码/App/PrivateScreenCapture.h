@@ -13,6 +13,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Fired once when several consecutive renders look empty (black) — caller should fall back.
 - (void)setBlankHandler:(void (^ _Nullable)(void))handler;
 - (void)stop;
+/// Recreate IOSurface and rotate render ABI (DirectPhoneBase-style self-heal).
+- (void)restartSurfaces;
 - (void)setPreferredFPS:(NSInteger)fps;
 
 @end
