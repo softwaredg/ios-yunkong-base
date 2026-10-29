@@ -360,9 +360,8 @@ final class AppRuntime: ObservableObject {
         capturer.onPixelBuffer = { [weak self] pb, ts in
             guard let self else { return }
             // Encode on the capture queue — never hop to MainActor (4MB copies there ≈ 2fps).
-            CVPixelBufferRetain(pb)
+            // pipeline.handle → encoder.copyPixelBuffer is synchronous; safe before ObjC releases.
             self.pipeline.handle(pixelBuffer: pb, ptsUs: ts)
-            CVPixelBufferRelease(pb)
             if self.pipeline.encodedFrameCount == 1 {
                 let w = CVPixelBufferGetWidth(pb)
                 let h = CVPixelBufferGetHeight(pb)
