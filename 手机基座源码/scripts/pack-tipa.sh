@@ -55,15 +55,15 @@ if grep -q '<!--' "$ROOT/App/App.entitlements"; then
   echo "error: App.entitlements has XML comments" >&2
   exit 1
 fi
-# ASCII-only path: brew ldid has written empty <dict/> when fed paths under 手机基座源码.
+# Copy to ASCII temp first — plutil/ldid reading 手机基座源码/... produced empty <dict/> (181 bytes).
 ENT_XML="$STAGE/App.entitlements.xml"
+cp "$ROOT/App/App.entitlements" "$ENT_XML"
 if command -v plutil >/dev/null 2>&1; then
-  plutil -convert xml1 -o "$ENT_XML" "$ROOT/App/App.entitlements"
-else
-  cp "$ROOT/App/App.entitlements" "$ENT_XML"
+  plutil -convert xml1 "$ENT_XML"
 fi
 echo "entitlements file for sign: $ENT_XML"
 wc -c "$ENT_XML"
+cat "$ENT_XML"
 grep -E 'global-capture|no-sandbox' "$ENT_XML" || {
   echo "error: ENT_XML missing required keys" >&2
   exit 1
