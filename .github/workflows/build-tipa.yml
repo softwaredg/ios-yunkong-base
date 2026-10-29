@@ -7,22 +7,19 @@ on:
         description: "version e.g. 0.2.0"
         required: false
         default: "0.2.0"
-      create_release:
-        description: "upload GitHub Release"
-        type: boolean
-        required: false
-        default: true
   push:
-    tags:
-      - "tipa-v*"
+    branches: [main]
+    paths:
+      - "手机基座源码/**"
+      - ".github/workflows/build-tipa.yml"
 
 permissions:
   contents: write
 
 jobs:
   tipa:
-    name: macOS build tipa
-    runs-on: macos-15
+    name: macOS tipa
+    runs-on: macos-15-intel
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,28 +27,24 @@ jobs:
       - name: Version
         id: ver
         run: |
-          if [[ -n "${{ github.event.inputs.version }}" ]]; then
-            V="${{ github.event.inputs.version }}"
-          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            V="${GITHUB_REF_NAME#tipa-v}"
-          else
-            V="0.2.0"
-          fi
+          V="${{ github.event.inputs.version }}"
+          if [[ -z "$V" ]]; then V="0.2.0"; fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Building version $V"
 
       - name: Install tools
         run: brew install xcodegen ldid
 
       - name: Select Xcode
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer || sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
 
       - name: Generate Xcode project
         working-directory: 手机基座源码
         run: xcodegen generate
 
-      - name: Build (unsigned iphoneos)
+      - name: Build unsigned
         working-directory: 手机基座源码
         run: |
           set -euo pipefail
@@ -84,8 +77,7 @@ jobs:
           path: 手机基座/*.tipa
           if-no-files-found: error
 
-      - name: Create / update GitHub Release
-        if: ${{ github.event_name == 'push' || github.event.inputs.create_release == 'true' || github.event.inputs.create_release == true }}
+      - name: GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.ver.outputs.version }}
@@ -93,12 +85,8 @@ jobs:
           set -euo pipefail
           TAG="tipa-v${VERSION}"
           TIPA=$(ls 手机基座/*.tipa | head -n1)
-          NOTES="IOS YunKong base tipa (TrollStore)
-- video: TVH4 TCP :5909
-- control: phonebase-control -> IOHID
-- HTTP: :11019 /control"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$TIPA" --clobber
           else
-            gh release create "$TAG" "$TIPA" --title "$TAG" --notes "$NOTES"
+            gh release create "$TAG" "$TIPA" --title "$TAG" --notes "TVH4 + IOHID tipa"
           fi
