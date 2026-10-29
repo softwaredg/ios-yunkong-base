@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "version e.g. 0.2.1"
+        description: "optional fixed version (skip auto +1); leave empty to bump patch"
         required: false
-        default: "0.2.1"
+        default: ""
   push:
     branches: [main]
     paths:
@@ -23,14 +23,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Version
-        id: ver
-        run: |
-          V="${{ github.event.inputs.version }}"
-          if [[ -z "$V" ]]; then V="0.2.1"; fi
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "Building version $V"
 
       - name: Install tools
         run: brew install xcodegen ldid
@@ -63,25 +55,48 @@ jobs:
             build
 
       - name: Pack tipa
+        id: pack
         env:
-          VERSION: ${{ steps.ver.outputs.version }}
           DERIVED_DATA: ${{ github.workspace }}/手机基座源码/build
         run: |
+          set -euo pipefail
           chmod +x 手机基座源码/scripts/pack-tipa.sh
+          INPUT="${{ github.event.inputs.version }}"
+          if [[ -n "${INPUT}" ]]; then
+            export VERSION="$INPUT"
+            export BUMP=0
+          else
+            unset VERSION || true
+            export BUMP=1
+          fi
           手机基座源码/scripts/pack-tipa.sh "${{ github.workspace }}/手机基座"
+          echo "packed $(tr -d '[:space:]' < 手机基座源码/VERSION)"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: IOSYunKongBase-${{ steps.ver.outputs.version }}-tipa
+          name: IOSYunKongBase-${{ steps.pack.outputs.version }}-tipa
           path: 手机基座/*.tipa
           if-no-files-found: error
+
+      - name: Commit version bump
+        run: |
+          set -euo pipefail
+          V="${{ steps.pack.outputs.version }}"
+          git add 手机基座源码/VERSION 手机基座源码/project.yml || true
+          if git diff --cached --quiet; then
+            echo "no version file changes"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "chore: tipa ${V} [skip ci]"
+          git push origin HEAD:main
 
       - name: GitHub Release
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.ver.outputs.version }}
+          VERSION: ${{ steps.pack.outputs.version }}
         run: |
           set -euo pipefail
           TAG="tipa-v${VERSION}"
@@ -89,5 +104,5 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$TIPA" --clobber
           else
-            gh release create "$TAG" "$TIPA" --title "$TAG" --notes "TVH4 + IOHID tipa · auto-start · memory restart"
+            gh release create "$TAG" "$TIPA" --title "$TAG" --notes "TVH4 + IOHID tipa ${VERSION}"
           fi
