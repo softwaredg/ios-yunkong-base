@@ -22,12 +22,17 @@ final class ScreenCapturer {
         running = true
         fallbackStarted = false
         lastFrameAt = Date.distantPast
-        if startPrivateCapture() {
-            startWatchdog()
-            return
-        }
-        onInfo?("私有采屏不可用，改用窗口快照（仅本 App 画面）")
+        // CARender/IOSurface on this tipa path was producing encodeable black/garbage
+        // frames (PC saw traffic, no picture). Prefer key-window snapshot so the
+        // small/big windows always show real pixels; private capture can be
+        // re-enabled once render is verified non-blank end-to-end.
+        onInfo?("窗口快照推流（保证有画面）· TVH4")
         startWindowSnapshotFallback()
+        if startPrivateCapture() {
+            // Private only upgrades the stream when it emits non-blank frames.
+            // Blank handler stops private; snapshot already running.
+            startWatchdog()
+        }
     }
 
     func stop() {
@@ -67,18 +72,20 @@ final class ScreenCapturer {
         cap.setPreferredFPS(15)
         // Empty CARender surfaces still produce H.264 traffic (black) — fall back.
         cap.setBlankHandler { [weak self] in
-            guard let self, self.running, !self.fallbackStarted else { return }
-            self.fallbackStarted = true
-            self.onInfo?("私有采屏为空帧，改用窗口快照兜底")
+            guard let self, self.running else { return }
+            self.onInfo?("私有采屏为空帧，已停用（保持窗口快照）")
             PrivateScreenCapture.shared().stop()
             self.usingPrivate = false
-            self.startWindowSnapshotFallback()
         }
         cap.start(handler: { [weak self] pb, ptsUs in
-            guard let self, self.running else { return }
+            guard let self, self.running, self.usingPrivate else { return }
+            // Snapshot already feeds the encoder; ignore private until proven useful.
+            // (Blank frames never reach here; first real frame can later replace snapshot.)
+            self.snapshotTimer?.invalidate()
+            self.snapshotTimer = nil
+            self.fallbackStarted = true
             self.emitFrame(pb, ptsUs: ptsUs)
         })
-        onInfo?("已自动采屏（无弹窗）· TVH4 直推")
         return true
     }
 
