@@ -339,7 +339,7 @@ final class LocalService {
             ],
             "autoStart": true,
             "appVersion": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
-            "captureMode": "window-snapshot",
+            "captureMode": "private-or-snapshot",
         ]
     }
 
