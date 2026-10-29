@@ -383,8 +383,8 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
 
 - (BOOL)tryEmitUICreateScreen:(CADisplayLink *)link {
     if (!_uiCreateScreen) return NO;
-    // Create-rule API (+1). ARC does not auto-release → CFBridgingRelease.
-    UIImage *shot = CFBridgingRelease((CFTypeRef)_uiCreateScreen());
+    // Create-rule API (+1). ARC does not auto-release — take ownership then ARC frees.
+    UIImage *shot = (__bridge_transfer UIImage *)_uiCreateScreen();
     if (!shot) return NO;
     CVPixelBufferRef fromUI = [self pixelBufferFromUIImage:shot];
     if (fromUI && [self bufferLooksReal:fromUI]) {
