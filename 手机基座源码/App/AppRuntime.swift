@@ -46,6 +46,8 @@ final class AppRuntime: ObservableObject {
     private var lastMemoryRestartAt: Date = .distantPast
     private var lastReason: String = ""
     private var startedOnce = false
+    /// UI process only — TVH4/capture run in `--helper` sibling (DirectPhoneBase model).
+    private var uiShellOnly = false
 
     init() {
         if let saved = UserDefaults.standard.string(forKey: "deviceId"), !saved.isEmpty {
@@ -71,7 +73,25 @@ final class AppRuntime: ObservableObject {
         }
         startedOnce = true
         refreshLanIP()
-        // No speaker audio — private process assertion keeps :11019/:5909 alive off-screen.
+
+        if !HelperLauncher.isHelperProcess() {
+            // UI shell: spawn helper that owns ports/capture (survives app background).
+            uiShellOnly = true
+            status = "正在拉起推流助手…"
+            DispatchQueue.global(qos: .userInitiated).async {
+                let ok = HelperLauncher.ensureHelperRunning()
+                Task { @MainActor in
+                    self.running = ok
+                    self.capturing = ok
+                    self.status = ok ? "助手推流中（切后台保持）" : "助手拉起失败，请重开 App"
+                    self.startUIStatusPoll()
+                }
+            }
+            return
+        }
+
+        // Helper process path.
+        HotspotKeepAlive.register()
         BackgroundKeepAlive.shared().start()
         beginStickyBackgroundTask()
         startService()
@@ -104,6 +124,13 @@ final class AppRuntime: ObservableObject {
     /// Called when scene becomes active / user returns to app.
     func ensureRunning(reason: String = "foreground") {
         refreshLanIP()
+        if uiShellOnly {
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = HelperLauncher.ensureHelperRunning()
+                Task { @MainActor in self.refreshFromHelperInfo() }
+            }
+            return
+        }
         BackgroundKeepAlive.shared().start()
         if service == nil || !running {
             status = "自动恢复服务（\(reason)）…"
@@ -114,10 +141,61 @@ final class AppRuntime: ObservableObject {
         }
     }
 
-    /// Re-assert process keep-alive when leaving the foreground (no sound).
+    /// UI may suspend; helper keeps :11019/:5909. Re-check helper on background.
     func enterBackground() {
+        if uiShellOnly {
+            DispatchQueue.global(qos: .utility).async {
+                _ = HelperLauncher.ensureHelperRunning()
+            }
+            return
+        }
         BackgroundKeepAlive.shared().start()
         beginStickyBackgroundTask()
+    }
+
+    private func startUIStatusPoll() {
+        ipTimer?.invalidate()
+        ipTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshLanIP()
+                self?.refreshFromHelperInfo()
+            }
+        }
+        if let ipTimer { RunLoop.main.add(ipTimer, forMode: .common) }
+    }
+
+    private func refreshFromHelperInfo() {
+        guard uiShellOnly else { return }
+        let port = Int(self.port)
+        DispatchQueue.global(qos: .utility).async {
+            var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/api/info")!)
+            req.timeoutInterval = 1.5
+            let task = URLSession.shared.dataTask(with: req) { data, _, _ in
+                guard let data,
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else {
+                    Task { @MainActor in
+                        self.running = false
+                        self.capturing = false
+                        self.status = "助手未响应，正在重拉…"
+                        DispatchQueue.global().async { _ = HelperLauncher.ensureHelperRunning() }
+                    }
+                    return
+                }
+                let mode = obj["captureMode"] as? String ?? ""
+                let streaming = obj["streaming"] as? Bool ?? false
+                let mem = (obj["memory"] as? [String: Any])?["serviceFootprintBytes"] as? Int ?? 0
+                let restarts = (obj["recovery"] as? [String: Any])?["restartCount"] as? Int ?? 0
+                Task { @MainActor in
+                    self.running = true
+                    self.capturing = streaming || mode == "private-full"
+                    self.memoryMB = mem / (1024 * 1024)
+                    self.restartCount = restarts
+                    self.status = "助手推流中 · \(mode.isEmpty ? "?" : mode)"
+                }
+            }
+            task.resume()
+        }
     }
 
     /// Soft restart: tear down HTTP/TVH4/encoder/capture and bring them back.

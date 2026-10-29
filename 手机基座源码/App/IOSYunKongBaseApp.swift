@@ -1,6 +1,5 @@
 import SwiftUI
 
-@main
 struct IOSYunKongBaseApp: App {
     @StateObject private var runtime = AppRuntime()
     @Environment(\.scenePhase) private var scenePhase
