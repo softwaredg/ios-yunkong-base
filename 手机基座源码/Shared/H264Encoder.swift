@@ -38,9 +38,7 @@ final class H264Encoder {
         let dur = max(30, targetFps * 4) as CFNumber
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: dur)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 4.0 as CFNumber)
-        // 2× average — tight 1× starved P into ~150B black holes; unbounded quality hunts → ~3fps.
-        let bytes = max(targetBitrate / 4, 200_000) as CFNumber
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: [bytes, 1] as CFArray)
+        // No DataRateLimits — any hard cap made ~150B P that Chrome paints solid black.
     }
 
     func start(width: Int32, height: Int32, fps: Int32, bitrateBps: Int32) throws {
@@ -86,8 +84,6 @@ final class H264Encoder {
         let dur = max(30, targetFps * 4) as CFNumber
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: dur)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 4.0 as CFNumber)
-        let bytes = max(targetBitrate / 4, 200_000) as CFNumber
-        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_DataRateLimits, value: [bytes, 1] as CFArray)
         VTCompressionSessionPrepareToEncodeFrames(sess)
     }
 
