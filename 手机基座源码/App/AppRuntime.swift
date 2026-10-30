@@ -279,6 +279,9 @@ final class AppRuntime: ObservableObject {
         svc.onRestartRequested = { [weak self] in
             Task { @MainActor in self?.restartService(reason: "api-restart") }
         }
+        svc.onVideoSettings = { [weak self] frameRate, bitrateMbps in
+            self?.pipeline.setEncode(fps: frameRate, bitrateMbps: bitrateMbps)
+        }
         svc.onControlJSON = { [weak self] obj in
             guard let self else { return nil }
             // handleControl is MainActor-isolated; prefer assumeIsolated when already
@@ -297,6 +300,10 @@ final class AppRuntime: ObservableObject {
         }
         do {
             try svc.start()
+            tcpVideo.onSetEncode = { [weak self] kbps, fps in
+                let mbps = max(1, (kbps + 500) / 1000)
+                self?.pipeline.setEncode(fps: fps, bitrateMbps: mbps)
+            }
             try tcpVideo.start(port: TcpVideoHub.defaultPort)
             service = svc
             running = true
