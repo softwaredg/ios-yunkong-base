@@ -26,8 +26,8 @@ final class H264Encoder {
     private let inflightLock = NSLock()
 
     func configure(fps: Int32, bitrateBps: Int32) {
-        targetFps = max(5, fps)
-        targetBitrate = max(500_000, bitrateBps)
+        targetFps = max(1, fps)
+        targetBitrate = max(100_000, bitrateBps)
         applySessionRate()
     }
 
