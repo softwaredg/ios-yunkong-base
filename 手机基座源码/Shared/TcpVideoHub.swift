@@ -13,6 +13,8 @@ final class TcpVideoHub {
     private var latestKeyframe: Data?
 
     private var listenPort: UInt16 = defaultPort
+    /// PC TVHC setEncode → (bitrateKbps, fps)
+    var onSetEncode: ((Int, Int) -> Void)?
 
     func start(port: UInt16 = defaultPort) throws {
         listenPort = port
@@ -98,10 +100,9 @@ final class TcpVideoHub {
                     if let cfg = self.latestConfig {
                         conn.send(content: cfg, completion: .contentProcessed { _ in })
                     }
-                    if let key = self.latestKeyframe {
-                        conn.send(content: key, completion: .contentProcessed { _ in })
-                    }
-                    NSLog("[TVH4] client ready, config=%d key=%d", self.latestConfig == nil ? 0 : 1, self.latestKeyframe == nil ? 0 : 1)
+                    // Do not reseed latestKeyframe — a stale/tiny IDR + live P-frames
+                    // made PC WebCodecs paint black until the next GOP. Live IDR follows.
+                    NSLog("[TVH4] client ready, config=%d (skip cached key)", self.latestConfig == nil ? 0 : 1)
                 case .failed, .cancelled:
                     self.drop(id, conn)
                 default:
@@ -114,12 +115,36 @@ final class TcpVideoHub {
     }
 
     private func receiveLoop(_ conn: NWConnection, id: ObjectIdentifier) {
-        conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] _, _, isComplete, error in
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
+            if let data, !data.isEmpty {
+                self?.queue.async { self?.handleClientData(data) }
+            }
             if isComplete || error != nil {
                 self?.queue.async { self?.drop(id, conn) }
                 return
             }
             self?.receiveLoop(conn, id: id)
+        }
+    }
+
+    /// TVHC = TrollVNC H.264 Control (16 bytes, big-endian) from PC agent.
+    private func handleClientData(_ data: Data) {
+        func u32be(_ at: Int) -> UInt32 {
+            data.subdata(in: at..<(at + 4)).withUnsafeBytes {
+                UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self))
+            }
+        }
+        var offset = 0
+        while offset + 16 <= data.count {
+            guard u32be(offset) == 0x5456_4843 else { break } // "TVHC"
+            let ver = data[offset + 4]
+            let cmd = data[offset + 5]
+            if ver == 1, cmd == 1 {
+                let kbps = Int(u32be(offset + 8))
+                let fps = Int(u32be(offset + 12))
+                onSetEncode?(kbps, fps)
+            }
+            offset += 16
         }
     }
 
@@ -132,9 +157,8 @@ final class TcpVideoHub {
     private func broadcast(_ data: Data) {
         for id in ready {
             guard let conn = clients[id] else { continue }
-            conn.send(content: data, completion: .contentProcessed { [weak self] err in
-                if err != nil { self?.queue.async { self?.drop(id, conn) } }
-            })
+            // idempotent: do not stall the encoder callback on TCP drain (was ~3fps).
+            conn.send(content: data, completion: .idempotent)
         }
     }
 }
