@@ -53,6 +53,13 @@ final class FramePipeline: @unchecked Sendable {
         wire()
     }
 
+    /// PC wall/focus prefs (HTTP or TVHC).
+    func setEncode(fps: Int, bitrateMbps: Int) {
+        let f = max(5, min(60, fps))
+        let mbps = max(1, min(20, bitrateMbps))
+        encoder.configure(fps: Int32(f), bitrateBps: Int32(mbps) * 1_000_000)
+    }
+
     func handle(pixelBuffer pb: CVPixelBuffer, ptsUs: UInt64) {
         let w = CVPixelBufferGetWidth(pb)
         let h = CVPixelBufferGetHeight(pb)
@@ -61,7 +68,8 @@ final class FramePipeline: @unchecked Sendable {
         let n = frameCount
         if !started {
             started = true
-            encoder.configure(fps: 30, bitrateBps: 4_000_000)
+            // Defaults; PC may override via /api/video-settings or TVHC.
+            encoder.configure(fps: 30, bitrateBps: 2_500_000)
         }
         frameCount = n + 1
         // Rely on VT MaxKeyFrameInterval — forcing every 30th capture caused encode stalls.
