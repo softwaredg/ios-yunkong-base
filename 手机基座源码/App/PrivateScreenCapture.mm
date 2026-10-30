@@ -93,7 +93,7 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
 - (instancetype)init {
     self = [super init];
     if (!self) return nil;
-    _fps = 30;
+    _fps = 60;
     _blankStreak = 0;
     _surfaceResets = 0;
     _looksRealCounter = 0;
@@ -211,7 +211,7 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
 }
 
 - (void)setPreferredFPS:(NSInteger)fps {
-    _fps = MAX(5, MIN(60, fps));
+    _fps = MAX(1, fps);
     if (_timer) {
         uint64_t interval = NSEC_PER_SEC / (uint64_t)_fps;
         dispatch_source_set_timer(_timer, DISPATCH_TIME_NOW, interval, interval / 5);
