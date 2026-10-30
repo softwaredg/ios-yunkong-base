@@ -304,6 +304,9 @@ final class AppRuntime: ObservableObject {
                 let mbps = max(1, (kbps + 500) / 1000)
                 self?.pipeline.setEncode(fps: fps, bitrateMbps: mbps)
             }
+            tcpVideo.onClientReady = { [weak self] in
+                self?.pipeline.requestKeyframe()
+            }
             try tcpVideo.start(port: TcpVideoHub.defaultPort)
             service = svc
             running = true
