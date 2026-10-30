@@ -18,8 +18,8 @@ final class H264Encoder {
     private var sentConfig = false
     private var targetFps: Int32 = 30
     private var targetBitrate: Int32 = 4_000_000
-    /// Cap long edge — 540 still ~4fps on SE-class; 480 leaves room for P-frames.
-    private let maxSide = 480
+    /// No downscale for phone logical sizes (≤720 long edge). User wants full resolution.
+    private let maxSide = 720
 
     private var inflight = false
     private var pending: (Unmanaged<CVPixelBuffer>, UInt64, Bool)?
