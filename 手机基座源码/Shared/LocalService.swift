@@ -30,8 +30,8 @@ final class LocalService {
     private var residentBytes: UInt64 = 0
     var memoryLimitBytes: UInt64 = 220 * 1024 * 1024
     private var requestedFrameRate = 0
-    private var frameRate = 30
-    private var bitrateMbps = 4
+    private var frameRate = 60
+    private var bitrateMbps = 8
     var onVideoSettings: ((Int, Int) -> Void)?
     var onControlJSON: (([String: Any]) -> [String: Any]?)?
     /// Soft-restart pipeline (HTTP + TVH4 + capture). Invoked by POST /api/control/restart.
@@ -206,9 +206,9 @@ final class LocalService {
                    let obj = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
                     let fr = intValue(obj["frameRate"])
                     let br = intValue(obj["bitrateMbps"])
-                    if let fr, let br, fr >= 0, fr <= 240, br >= 1, br <= 20 {
+                    if let fr, let br, fr >= 0, fr <= 240, br >= 1, br <= 100 {
                         requestedFrameRate = fr
-                        frameRate = fr == 0 ? 30 : fr
+                        frameRate = fr == 0 ? 60 : fr
                         bitrateMbps = br
                         onVideoSettings?(frameRate, bitrateMbps)
                     }
@@ -303,10 +303,10 @@ final class LocalService {
             "version": 1,
             "requestedFrameRate": requestedFrameRate,
             "frameRate": frameRate,
-            "maxFrameRate": 60,
+            "maxFrameRate": 120,
             "bitrateMbps": bitrateMbps,
             "minBitrateMbps": 1,
-            "maxBitrateMbps": 20,
+            "maxBitrateMbps": 100,
         ]
     }
 
