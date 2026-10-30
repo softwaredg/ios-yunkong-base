@@ -10,9 +10,17 @@ final class FramePipeline: @unchecked Sendable {
     private(set) var frameCount: UInt64 = 0
     private(set) var lastEncodedAt: Date = .distantPast
     private var started = false
+    private var forceKeyOnce = false
 
     init(tcpVideo: TcpVideoHub) {
         self.tcpVideo = tcpVideo
+    }
+
+    /// New TVH4 client: skip cached IDR, so force a fresh one on the next capture.
+    func requestKeyframe() {
+        lock.lock()
+        forceKeyOnce = true
+        lock.unlock()
     }
 
     func attach(service: LocalService?) {
@@ -72,10 +80,11 @@ final class FramePipeline: @unchecked Sendable {
             encoder.configure(fps: 30, bitrateBps: 2_500_000)
         }
         frameCount = n + 1
-        // Rely on VT MaxKeyFrameInterval — forcing every 30th capture caused encode stalls.
+        let force = forceKeyOnce
+        if force { forceKeyOnce = false }
         lock.unlock()
         svc?.updateGeometry(width: w, height: h)
-        encoder.encode(pixelBuffer: pb, ptsUs: ptsUs, forceKeyframe: false)
+        encoder.encode(pixelBuffer: pb, ptsUs: ptsUs, forceKeyframe: force)
     }
 
     var encodedFrameCount: UInt64 {
