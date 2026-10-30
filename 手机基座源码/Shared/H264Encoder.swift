@@ -35,10 +35,12 @@ final class H264Encoder {
         guard let session else { return }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: targetBitrate as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: targetFps as CFNumber)
-        let dur = max(15, targetFps * 2) as CFNumber
+        let dur = max(30, targetFps * 4) as CFNumber
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: dur)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 2.0 as CFNumber)
-        // No DataRateLimits — hard cap was starving P-frames into ~150B black holes in Chrome.
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 4.0 as CFNumber)
+        // 2× average — tight 1× starved P into ~150B black holes; unbounded quality hunts → ~3fps.
+        let bytes = max(targetBitrate / 4, 200_000) as CFNumber
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: [bytes, 1] as CFArray)
     }
 
     func start(width: Int32, height: Int32, fps: Int32, bitrateBps: Int32) throws {
@@ -74,15 +76,18 @@ final class H264Encoder {
         }
         session = sess
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        // Baseline + HW. Main fell back to ~3fps software on device; web skip-black handles bad P.
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        // String key — Swift const is newer; HW defaults quality-first and crawled ~3fps.
+        VTSessionSetProperty(sess, key: "PrioritizeEncodingSpeedOverQuality" as CFString, value: kCFBooleanTrue)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: targetBitrate as CFNumber)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: targetFps as CFNumber)
-        // Interval is frames; Duration caps wall-clock. 1s IDRs ate the bitrate (~4fps).
-        let dur = max(15, targetFps * 2) as CFNumber
+        // Longer GOP — frequent fat IDRs dominated encode time at low fps.
+        let dur = max(30, targetFps * 4) as CFNumber
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: dur)
-        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 2.0 as CFNumber)
+        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 4.0 as CFNumber)
+        let bytes = max(targetBitrate / 4, 200_000) as CFNumber
+        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_DataRateLimits, value: [bytes, 1] as CFArray)
         VTCompressionSessionPrepareToEncodeFrames(sess)
     }
 
