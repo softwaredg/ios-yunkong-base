@@ -18,8 +18,8 @@ final class H264Encoder {
     private var sentConfig = false
     private var targetFps: Int32 = 30
     private var targetBitrate: Int32 = 4_000_000
-    /// Cap long edge — 720 still starved SE-class VT to ~3fps; 540 keeps UI readable.
-    private let maxSide = 540
+    /// Cap long edge — 540 still ~4fps on SE-class; 480 leaves room for P-frames.
+    private let maxSide = 480
 
     private var inflight = false
     private var pending: (Unmanaged<CVPixelBuffer>, UInt64, Bool)?
@@ -35,9 +35,9 @@ final class H264Encoder {
         guard let session else { return }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: targetBitrate as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: targetFps as CFNumber)
-        let dur = max(8, targetFps) as CFNumber
+        let dur = max(15, targetFps * 2) as CFNumber
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: dur)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 1.0 as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 2.0 as CFNumber)
         let bytes = max(targetBitrate / 8, 50_000) as CFNumber
         let limit = [bytes, 1] as CFArray
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limit)
@@ -80,10 +80,10 @@ final class H264Encoder {
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: targetBitrate as CFNumber)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: targetFps as CFNumber)
-        // Interval is in frames — fps*2 became ~30s between IDRs when encode was slow.
-        let dur = max(8, targetFps) as CFNumber
+        // Interval is frames; Duration caps wall-clock. 1s IDRs ate the bitrate (~4fps).
+        let dur = max(15, targetFps * 2) as CFNumber
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: dur)
-        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 1.0 as CFNumber)
+        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 2.0 as CFNumber)
         VTCompressionSessionPrepareToEncodeFrames(sess)
     }
 
