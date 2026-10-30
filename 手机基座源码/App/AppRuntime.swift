@@ -281,6 +281,7 @@ final class AppRuntime: ObservableObject {
         }
         svc.onVideoSettings = { [weak self] frameRate, bitrateMbps in
             self?.pipeline.setEncode(fps: frameRate, bitrateMbps: bitrateMbps)
+            PrivateScreenCapture.shared().setPreferredFPS(frameRate > 0 ? frameRate : 60)
         }
         svc.onControlJSON = { [weak self] obj in
             guard let self else { return nil }
@@ -303,6 +304,7 @@ final class AppRuntime: ObservableObject {
             tcpVideo.onSetEncode = { [weak self] kbps, fps in
                 let mbps = max(1, (kbps + 500) / 1000)
                 self?.pipeline.setEncode(fps: fps, bitrateMbps: mbps)
+                PrivateScreenCapture.shared().setPreferredFPS(max(1, fps))
             }
             tcpVideo.onClientReady = { [weak self] in
                 self?.pipeline.requestKeyframe()
