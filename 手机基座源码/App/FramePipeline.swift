@@ -61,10 +61,10 @@ final class FramePipeline: @unchecked Sendable {
         wire()
     }
 
-    /// PC wall/focus prefs (HTTP or TVHC).
+    /// PC wall/focus prefs (HTTP or TVHC) — no tipa-side fps/bitrate cap.
     func setEncode(fps: Int, bitrateMbps: Int) {
-        let f = max(5, min(60, fps))
-        let mbps = max(1, min(20, bitrateMbps))
+        let f = max(1, fps)
+        let mbps = max(1, bitrateMbps)
         encoder.configure(fps: Int32(f), bitrateBps: Int32(mbps) * 1_000_000)
     }
 
@@ -76,8 +76,8 @@ final class FramePipeline: @unchecked Sendable {
         let n = frameCount
         if !started {
             started = true
-            // Defaults; PC may override via /api/video-settings or TVHC.
-            encoder.configure(fps: 30, bitrateBps: 2_500_000)
+            // Defaults; PC overrides via /api/video-settings or TVHC.
+            encoder.configure(fps: 60, bitrateBps: 8_000_000)
         }
         frameCount = n + 1
         let force = forceKeyOnce
