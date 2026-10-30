@@ -15,6 +15,8 @@ final class TcpVideoHub {
     private var listenPort: UInt16 = defaultPort
     /// PC TVHC setEncode → (bitrateKbps, fps)
     var onSetEncode: ((Int, Int) -> Void)?
+    /// New viewer ready — ask encoder for a live IDR (cached key is not reseeded).
+    var onClientReady: (() -> Void)?
 
     func start(port: UInt16 = defaultPort) throws {
         listenPort = port
@@ -100,9 +102,10 @@ final class TcpVideoHub {
                     if let cfg = self.latestConfig {
                         conn.send(content: cfg, completion: .contentProcessed { _ in })
                     }
-                    // Do not reseed latestKeyframe — a stale/tiny IDR + live P-frames
-                    // made PC WebCodecs paint black until the next GOP. Live IDR follows.
-                    NSLog("[TVH4] client ready, config=%d (skip cached key)", self.latestConfig == nil ? 0 : 1)
+                    // Do not reseed latestKeyframe — stale/tiny IDR painted black on PC.
+                    // Ask pipeline for a fresh IDR (MaxKeyFrameInterval alone can be tens of seconds when encode is slow).
+                    NSLog("[TVH4] client ready, config=%d (skip cached key → force IDR)", self.latestConfig == nil ? 0 : 1)
+                    self.onClientReady?()
                 case .failed, .cancelled:
                     self.drop(id, conn)
                 default:
