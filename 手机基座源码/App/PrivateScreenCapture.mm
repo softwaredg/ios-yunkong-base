@@ -577,10 +577,10 @@ typedef NS_ENUM(NSInteger, PSCRenderMode) {
             CVPixelBufferRef wrapped = NULL;
             NSDictionary *attrs = @{ (id)kCVPixelBufferIOSurfacePropertiesKey : @{} };
             if (_pbFromSurface(kCFAllocatorDefault, surface, (__bridge CFDictionaryRef)attrs, &wrapped) == kCVReturnSuccess && wrapped) {
-                // Full pixel scan every tick was wasteful; spot-check while streaming.
-                BOOL check = ((_looksRealCounter++ % 15) == 0) || _blankStreak > 0;
-                BOOL real = check ? [self bufferLooksReal:wrapped] : YES;
-                if (real) {
+                // ALWAYS reject blank CARender buffers — skipping the check (~1/15)
+                // encoded solid-black frames; PC saw ~90% black P / 一闪一闪.
+                _looksRealCounter++;
+                if ([self bufferLooksReal:wrapped]) {
                     _surfaceIdx ^= 1;
                     [self enqueueScale:wrapped]; // takes Create +1
                     return;
