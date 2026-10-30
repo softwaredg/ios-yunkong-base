@@ -38,9 +38,7 @@ final class H264Encoder {
         let dur = max(15, targetFps * 2) as CFNumber
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: dur)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 2.0 as CFNumber)
-        let bytes = max(targetBitrate / 8, 50_000) as CFNumber
-        let limit = [bytes, 1] as CFArray
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limit)
+        // No DataRateLimits — hard cap was starving P-frames into ~150B black holes in Chrome.
     }
 
     func start(width: Int32, height: Int32, fps: Int32, bitrateBps: Int32) throws {
@@ -76,10 +74,12 @@ final class H264Encoder {
         }
         session = sess
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
+        // Main — Baseline + Chrome WebCodecs often paints tiny P as solid black.
+        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Main_AutoLevel)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: targetBitrate as CFNumber)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: targetFps as CFNumber)
+        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
         // Interval is frames; Duration caps wall-clock. 1s IDRs ate the bitrate (~4fps).
         let dur = max(15, targetFps * 2) as CFNumber
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: dur)
