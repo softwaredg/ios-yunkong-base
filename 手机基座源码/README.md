@@ -1,28 +1,27 @@
-# IOS 云控基座（TVH4 + IOHID）
+# IOS 云控基座（PHB1 + IOHID）
 
-对标商业版 **DirectPhoneBase** 路线：**不越狱、不用 VNC**。
+源码已替换为投屏解包 `PhoneBaseLocal`：画面 **PHB1 H.264 over WS `/video`**，控制 **`/control`**。无 VNC / TVH4 / `:5909`。
 
 | 层 | 方案 |
 |------|------|
-| 采屏 | 私有 `CARenderServer` + `IOSurface`（TrollStore tipa 权限） |
+| 采屏 | `CARenderServer` + IOSurface（失败则演示帧） |
 | 编码 | VideoToolbox H.264 |
-| 推流 | TVH4 TCP `:5909` |
-| 控制 | 开源 IOHID → `ws://手机:11019/control` |
-| 电脑解码 | WebCodecs（PC 端已有） |
-| 自愈 | 内存守护整机软重启 + 采屏 IOSurface 重建 |
-| 兜底 | 前台窗口快照；ReplayKit 扩展仅保留作备用，主路径不弹录屏授权 |
+| 推流 | `ws://手机:11019/video`（PHB1） |
+| 控制 | IOHID → `ws://手机:11019/control` |
+| USB | 同协议端口 `11021` |
+| 电脑解码 | WebCodecs（PC 端） |
 
 ## 端口
 
 | 服务 | 地址 |
 |------|------|
-| HTTP /control /video | `:11019` |
-| TVH4 视频 | `:5909` |
-
-## IOHID 协议
-
-完整字段见 **[IOHID协议.md](./IOHID协议.md)**。
+| HTTP / WS `/video` `/control` | `:11019` |
+| USB 同协议 | `:11021` |
 
 ## 打 tipa
 
-须 Mac / GitHub Actions + **TrollStore**（私有 entitlement）。源码 HID：`App/Vendor/STHID/`（GPL-2）。
+须 Mac / GitHub Actions + **TrollStore**。源码在 `PhoneBaseLocal/`。打包脚本仍产出 `IOSYunKongBase.app`。
+
+**不要擅自打包**——等产品明确说「打包」再打。
+
+旧 TVH4 树已归档到 `归档/基座研发/旧TVH4基座-*`。

@@ -1,3 +1,4 @@
+# PHB1 PhoneBaseLocal (from 投屏解包). Pack scripts still emit IOSYunKongBase.app.
 name: IOSYunKongBase
 options:
   bundleIdPrefix: cn.iosmirror
@@ -17,26 +18,21 @@ targets:
     type: application
     platform: iOS
     sources:
-      - path: App
-      - path: Shared
+      - path: PhoneBaseLocal
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: cn.iosmirror.base
         PRODUCT_NAME: IOSYunKongBase
-        INFOPLIST_FILE: App/Info.plist
+        INFOPLIST_FILE: PhoneBaseLocal/Info.plist
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO
         CODE_SIGN_IDENTITY: ""
         DEVELOPMENT_TEAM: ""
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CURRENT_PROJECT_VERSION: 1
-        MARKETING_VERSION: "0.2.42"
+        MARKETING_VERSION: "0.2.43"
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1,2"
-        SWIFT_OBJC_BRIDGING_HEADER: App/IOSYunKongBase-Bridging-Header.h
-        HEADER_SEARCH_PATHS:
-          - "$(inherited)"
-          - "$(SRCROOT)/App/Vendor/STHID"
         OTHER_LDFLAGS:
           - "$(inherited)"
           - "-framework"
@@ -48,45 +44,26 @@ targets:
           - "-framework"
           - "UIKit"
           - "-framework"
-          - "NetworkExtension"
+          - "VideoToolbox"
           - "-framework"
-          - "Accelerate"
+          - "CoreMedia"
+          - "-framework"
+          - "CoreVideo"
+          - "-framework"
+          - "AVFoundation"
         CLANG_ENABLE_OBJC_ARC: YES
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"
           - "@executable_path/Frameworks"
-        # Prefer CODE_SIGN_ENTITLEMENTS over xcodegen `entitlements.path`
-        # (the latter rewrote App/App.entitlements to empty <dict/> on GHA).
         CODE_SIGN_ENTITLEMENTS: signing/App.entitlements
     dependencies:
-      - target: Broadcast
-        embed: true
-        codeSign: false
+      - sdk: IOSurface.framework
+      - sdk: VideoToolbox.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
+      - sdk: CoreFoundation.framework
+      - sdk: UIKit.framework
+      - sdk: AVFoundation.framework
     scheme:
       testTargets: []
-
-  Broadcast:
-    type: app-extension
-    platform: iOS
-    sources:
-      - path: Extension
-      - path: Shared
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: cn.iosmirror.base.Broadcast
-        PRODUCT_NAME: Broadcast
-        INFOPLIST_FILE: Extension/Info.plist
-        CODE_SIGNING_ALLOWED: NO
-        CODE_SIGNING_REQUIRED: NO
-        CODE_SIGN_IDENTITY: ""
-        DEVELOPMENT_TEAM: ""
-        SKIP_INSTALL: YES
-        CURRENT_PROJECT_VERSION: 1
-        MARKETING_VERSION: "0.2.42"
-        GENERATE_INFOPLIST_FILE: NO
-        LD_RUNPATH_SEARCH_PATHS:
-          - "$(inherited)"
-          - "@executable_path/Frameworks"
-          - "@executable_path/../../Frameworks"
-    entitlements:
-      path: Extension/Extension.entitlements

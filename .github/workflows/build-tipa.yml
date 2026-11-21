@@ -83,7 +83,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: IOSYunKongBase-${{ steps.ver.outputs.version }}-tipa
+          name: IOS投屏-${{ steps.ver.outputs.version }}-tipa
           path: 手机基座/*.tipa
           if-no-files-found: error
 
@@ -112,5 +112,5 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$TIPA" --clobber
           else
-            gh release create "$TAG" "$TIPA" --title "$TAG" --notes "TVH4 + IOHID tipa ${VERSION}"
+            gh release create "$TAG" "$TIPA" --title "$TAG" --notes "IOS投屏 tipa ${VERSION}"
           fi

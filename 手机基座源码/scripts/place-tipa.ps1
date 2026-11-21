@@ -16,7 +16,9 @@ if ($RunId -le 0) {
 }
 
 $arts = gh api "repos/$Repo/actions/runs/$RunId/artifacts" | ConvertFrom-Json
-$art = $arts.artifacts | Where-Object { $_.name -like "IOSYunKongBase-*-tipa" } | Select-Object -First 1
+$art = $arts.artifacts |
+  Where-Object { $_.name -like "IOS投屏-*-tipa" -or $_.name -like "IOSYunKongBase-*-tipa" } |
+  Select-Object -First 1
 if (-not $art) { throw "no tipa artifact on run $RunId" }
 
 $tmp = Join-Path $env:TEMP ("tipa-dl-" + [guid]::NewGuid().ToString("n"))
@@ -27,15 +29,20 @@ try {
   if (-not $tipa) { throw "no tipa in artifact $($art.name)" }
 
   New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-  Get-ChildItem -LiteralPath $OutDir -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -like "IOS云控基座*.tipa" -or $_.Name -like "IOS*-TVH4-IOHID-*.tipa" } |
-    Remove-Item -Force
   Get-ChildItem -LiteralPath $OutDir -Directory -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -like "tipa-*" } |
     Remove-Item -Recurse -Force
 
   $dest = Join-Path $OutDir $tipa.Name
   Copy-Item -Force $tipa.FullName $dest
+  $destFull = [IO.Path]::GetFullPath($dest)
+  # 每次生成只保留最新 tipa，其余全部清掉
+  Get-ChildItem -LiteralPath $OutDir -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -ieq ".tipa" -and $_.FullName -ne $destFull } |
+    ForEach-Object {
+      Write-Host "remove old $($_.Name)"
+      Remove-Item -LiteralPath $_.FullName -Force
+    }
   Write-Host "placed $dest (from $($art.name))"
   Get-Item $dest | Format-List FullName, Length, LastWriteTime
 }

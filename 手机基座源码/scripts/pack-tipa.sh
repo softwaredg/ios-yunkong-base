@@ -11,7 +11,7 @@ APP_NAME="IOSYunKongBase"
 DERIVED="${DERIVED_DATA:-$ROOT/build}"
 PRODUCTS="$DERIVED/Build/Products/Release-iphoneos"
 APP="$PRODUCTS/${APP_NAME}.app"
-PREFIX="IOS云控基座-TVH4-IOHID"
+PREFIX="IOS投屏"
 
 VERSION="$(tr -d '[:space:]' <"$VERSION_FILE" 2>/dev/null || true)"
 if [[ -z "$VERSION" ]]; then
@@ -51,20 +51,20 @@ if [[ -f "$PLIST" ]]; then
   echo "stamped Info.plist CFBundleShortVersionString=${VERSION}"
 fi
 
-if grep -q '<!--' "$ROOT/App/App.entitlements"; then
-  echo "error: App.entitlements has XML comments" >&2
-  exit 1
-fi
-# Use signing/ (not App/) — xcodegen regenerates App/App.entitlements as empty <dict/> (181 bytes).
+# Use signing/ entitlements (PhoneBaseLocal has no App/App.entitlements).
 ENT_SRC="$ROOT/signing/App.entitlements"
 if [[ ! -f "$ENT_SRC" ]]; then
   echo "error: missing $ENT_SRC" >&2
   exit 1
 fi
+if grep -q '<!--' "$ENT_SRC"; then
+  echo "error: $ENT_SRC has XML comments" >&2
+  exit 1
+fi
 ENT_XML="$STAGE/App.entitlements.xml"
 cp "$ENT_SRC" "$ENT_XML"
 echo "entitlements file for sign: $ENT_XML (from signing/)"
-ls -la "$ENT_SRC" "$ROOT/App/App.entitlements" "$ENT_XML" || true
+ls -la "$ENT_SRC" "$ENT_XML" || true
 wc -c "$ENT_XML"
 grep -E 'global-capture|no-sandbox' "$ENT_XML" || {
   echo "error: ENT_XML missing required keys" >&2
@@ -112,11 +112,13 @@ TIPA="$OUT_DIR/${PREFIX}-${VERSION}.tipa"
   zip -qry "$TIPA" Payload
 )
 
-# Drop previous 云控 tipa builds + download staging dirs; keep the new file.
+# Keep only the tipa just written; drop every other *.tipa + staging dirs.
+TIPA_ABS="$(cd "$(dirname "$TIPA")" && pwd)/$(basename "$TIPA")"
 shopt -s nullglob
-for f in "$OUT_DIR"/${PREFIX}-*.tipa "$OUT_DIR"/IOS云控基座.tipa; do
+for f in "$OUT_DIR"/*.tipa; do
   [[ -e "$f" ]] || continue
-  if [[ "$(cd "$(dirname "$f")" && pwd)/$(basename "$f")" != "$(cd "$(dirname "$TIPA")" && pwd)/$(basename "$TIPA")" ]]; then
+  F_ABS="$(cd "$(dirname "$f")" && pwd)/$(basename "$f")"
+  if [[ "$F_ABS" != "$TIPA_ABS" ]]; then
     echo "remove old $(basename "$f")"
     rm -f "$f"
   fi
