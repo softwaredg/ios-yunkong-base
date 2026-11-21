@@ -109,8 +109,11 @@ jobs:
           set -euo pipefail
           TAG="tipa-v${VERSION}"
           TIPA=$(ls 手机基座/*.tipa | head -n1)
+          # GitHub Release 对中文文件名会乱码，发布用 ASCII 名；产物里仍保留 IOS投屏-*.tipa
+          REL="手机基座/IOSTouPing-${VERSION}.tipa"
+          cp "$TIPA" "$REL"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$TIPA" --clobber
+            gh release upload "$TAG" "$REL" --clobber
           else
-            gh release create "$TAG" "$TIPA" --title "$TAG" --notes "IOS投屏 tipa ${VERSION}"
+            gh release create "$TAG" "$REL" --title "$TAG" --notes "IOS投屏 tipa ${VERSION}"
           fi
