@@ -182,27 +182,39 @@ final class ControlHub {
             injector.injectKey(key)
             ack(session, seq: seq, ok: true)
         case "open-url":
-            // PC「更新基座」：直接跳巨魔，不经 Safari
+            // PC「更新基座」：直接跳巨魔，不经 Safari；ack 以系统 open 结果为准
             let seq = intVal(obj["seq"]) ?? 0
             let raw = (obj["url"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let url = URL(string: raw), Self.allowedOpenURL(url) else {
+            guard raw.utf8.count <= 8192, let url = URL(string: raw), Self.allowedOpenURL(url) else {
                 ack(session, seq: seq, ok: false, error: "bad url")
                 return
             }
-            DispatchQueue.main.async {
-                UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            DispatchQueue.main.async { [weak self, weak session] in
+                guard let self, let session else { return }
+                UIApplication.shared.open(url, options: [:]) { ok in
+                    if ok {
+                        AppRunLog.shared.append("控制通道打开巨魔 scheme=\(url.scheme ?? "?")")
+                        self.ack(session, seq: seq, ok: true)
+                    } else {
+                        AppRunLog.shared.append("控制通道打开失败 scheme=\(url.scheme ?? "?")")
+                        self.ack(session, seq: seq, ok: false, error: "open failed")
+                    }
+                }
             }
-            AppRunLog.shared.append("控制通道打开 URL scheme=\(url.scheme ?? "?")")
-            ack(session, seq: seq, ok: true)
         default:
             break
         }
     }
 
-    /// 仅允许巨魔安装 / 本应用唤起，避免被当成任意 URL 跳板
+    /// 仅允许巨魔 install / 本应用唤起，避免被当成任意 URL 跳板
     private static func allowedOpenURL(_ url: URL) -> Bool {
         let scheme = (url.scheme ?? "").lowercased()
-        if scheme == "apple-magnifier" { return true }
+        if scheme == "apple-magnifier" {
+            // apple-magnifier://install?url=…
+            let host = (url.host ?? "").lowercased()
+            let path = url.path.lowercased()
+            return host == "install" || path == "/install" || path.hasSuffix("/install")
+        }
         if scheme == "phonebase" { return true }
         return false
     }
