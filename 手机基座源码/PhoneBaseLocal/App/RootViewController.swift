@@ -9,10 +9,12 @@ final class RootViewController: UIViewController {
     private let ipLabel = UILabel()
     private let selfTestLabel = UILabel()
     private let updateLabel = UILabel()
+    private let deviceInfoLabel = UILabel()
     private let toggleButton = UIButton(type: .system)
     private let freePortButton = UIButton(type: .system)
     private let selfTestButton = UIButton(type: .system)
     private let updateButton = UIButton(type: .system)
+    private let runLogButton = UIButton(type: .system)
     private var pendingManifest: TipaSelfUpdate.Manifest?
     private var didAutoCheckUpdate = false
 
@@ -74,6 +76,18 @@ final class RootViewController: UIViewController {
         updateLabel.numberOfLines = 0
         updateLabel.text = "当前版本 \(TipaSelfUpdate.localVersion)"
 
+        runLogButton.setTitle("运行日志", for: .normal)
+        stylePrimary(runLogButton, color: UIColor(red: 0.35, green: 0.40, blue: 0.48, alpha: 1))
+        runLogButton.addTarget(self, action: #selector(openRunLog), for: .touchUpInside)
+
+        deviceInfoLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        deviceInfoLabel.textColor = UIColor(white: 0.78, alpha: 1)
+        deviceInfoLabel.numberOfLines = 0
+        deviceInfoLabel.backgroundColor = UIColor(white: 0.12, alpha: 1)
+        deviceInfoLabel.layer.cornerRadius = 10
+        deviceInfoLabel.clipsToBounds = true
+        deviceInfoLabel.textAlignment = .left
+
         let stack = UIStackView(arrangedSubviews: [
             titleLabel,
             freePortButton,
@@ -81,6 +95,8 @@ final class RootViewController: UIViewController {
             selfTestButton,
             updateButton,
             updateLabel,
+            runLogButton,
+            deviceInfoLabel,
             statusLabel,
             ipLabel,
             selfTestLabel,
@@ -113,9 +129,11 @@ final class RootViewController: UIViewController {
             DispatchQueue.main.async {
                 self?.statusLabel.text = text
                 self?.toggleButton.setTitle(self?.runtime.isRunning == true ? "停止服务" : "启动服务", for: .normal)
+                self?.refreshDeviceInfo()
             }
         }
         refreshIP()
+        refreshDeviceInfo()
         // 勿用 3s 主线程轮询：和 CADisplayLink 抢主线程 → 投屏周期性卡一下
         NotificationCenter.default.addObserver(
             self,
@@ -131,6 +149,7 @@ final class RootViewController: UIViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        refreshDeviceInfo()
         if !didAutoCheckUpdate {
             didAutoCheckUpdate = true
             checkUpdate(silent: true)
@@ -139,12 +158,33 @@ final class RootViewController: UIViewController {
 
     @objc private func onAppActive() {
         refreshIP()
+        refreshDeviceInfo()
+    }
+
+    @objc private func openRunLog() {
+        let vc = RunLogViewController()
+        let nav = UINavigationController(rootViewController: vc)
+        nav.navigationBar.prefersLargeTitles = false
+        nav.modalPresentationStyle = .pageSheet
+        present(nav, animated: true)
+    }
+
+    private func refreshDeviceInfo() {
+        let rows = DeviceStatusInfo.rows(runtimeRunning: runtime.isRunning)
+        var lines: [String] = ["设备信息"]
+        for r in rows {
+            let mark = r.title == "运行状态" && runtime.isRunning ? "● " : "  "
+            lines.append("\(mark)\(r.title)：\(r.value)")
+        }
+        // 左右内边距用空格近似（UILabel 无 contentInset）
+        deviceInfoLabel.text = "\n  " + lines.joined(separator: "\n  ") + "\n"
     }
 
     @objc private func onUpdateButton() {
         if let m = pendingManifest {
             _ = TipaSelfUpdate.openInstall(manifest: m)
             updateLabel.text = "已打开巨魔安装 \(m.version)\n装完回到本应用即可"
+            AppRunLog.shared.append("打开巨魔安装 \(m.version)")
             return
         }
         checkUpdate(silent: false)
@@ -154,6 +194,7 @@ final class RootViewController: UIViewController {
         if !silent {
             updateButton.isEnabled = false
             updateLabel.text = "正在检查更新…"
+            AppRunLog.shared.append("开始检查更新")
         }
         TipaSelfUpdate.check { [weak self] result in
             guard let self else { return }
@@ -163,6 +204,7 @@ final class RootViewController: UIViewController {
                 self.pendingManifest = nil
                 self.updateButton.setTitle("检查更新", for: .normal)
                 self.updateLabel.text = "已是最新 · 本机 \(local) · 线上 \(remote)"
+                AppRunLog.shared.append("已是最新 local=\(local) remote=\(remote)")
             case let .available(local, manifest):
                 self.pendingManifest = manifest
                 self.updateButton.setTitle("去安装 \(manifest.version)", for: .normal)
@@ -170,12 +212,14 @@ final class RootViewController: UIViewController {
                 if !manifest.notes.isEmpty { text += "\n\(manifest.notes)" }
                 text += "\n点上方按钮用巨魔安装"
                 self.updateLabel.text = text
+                AppRunLog.shared.append("发现新版 \(manifest.version)（本机 \(local)）")
             case let .failed(msg):
                 if silent {
                     self.updateLabel.text = "当前版本 \(TipaSelfUpdate.localVersion)\n检查失败：\(msg)"
                 } else {
                     self.updateLabel.text = "检查失败：\(msg)\n可稍后重试"
                 }
+                AppRunLog.shared.append("检查更新失败：\(msg)")
             }
         }
     }
@@ -198,18 +242,22 @@ final class RootViewController: UIViewController {
 
     @objc private func toggle() {
         if runtime.isRunning {
+            AppRunLog.shared.append("用户停止服务")
             runtime.stop()
             toggleButton.setTitle("启动服务", for: .normal)
         } else {
+            AppRunLog.shared.append("用户启动服务")
             runtime.start()
             toggleButton.setTitle(runtime.isRunning ? "停止服务" : "启动服务", for: .normal)
         }
         refreshIP()
+        refreshDeviceInfo()
     }
 
     @objc private func freePort() {
         freePortButton.isEnabled = false
         statusLabel.text = "正在释放 \(runtime.port) 端口占用…"
+        AppRunLog.shared.append("开始释放端口 \(runtime.port)")
         if runtime.isRunning { runtime.stop() }
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -235,9 +283,12 @@ final class RootViewController: UIViewController {
                     lines.append("启动仍失败：手机上的 Direct(LanCaptureHelper) 占着 11019")
                     lines.append("请到 TrollStore 卸载 Direct / PhoneBaseDirect 后重开本应用")
                 }
-                self.statusLabel.text = lines.joined(separator: "\n")
+                let joined = lines.joined(separator: "\n")
+                self.statusLabel.text = joined
+                AppRunLog.shared.append(joined)
                 self.freePortButton.isEnabled = true
                 self.refreshIP()
+                self.refreshDeviceInfo()
                 self.runSelfTest()
             }
         }
@@ -259,8 +310,10 @@ final class RootViewController: UIViewController {
             }
             let warn = Self.conflictHint(localBody: local, oursRunning: oursRunning)
             DispatchQueue.main.async {
-                self?.selfTestLabel.text =
+                let summary =
                     "本机自检\n127.0.0.1 → \(local)\nLAN → \(lanResult)\n\(warn)\n可向下滑动查看更多"
+                self?.selfTestLabel.text = summary
+                AppRunLog.shared.append("自检 127.0.0.1 → \(local)；LAN → \(lanResult)")
             }
         }
     }
