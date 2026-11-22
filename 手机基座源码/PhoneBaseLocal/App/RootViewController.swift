@@ -129,7 +129,8 @@ final class RootViewController: UIViewController {
             DispatchQueue.main.async {
                 self?.statusLabel.text = text
                 self?.toggleButton.setTitle(self?.runtime.isRunning == true ? "停止服务" : "启动服务", for: .normal)
-                self?.refreshDeviceInfo()
+                // 不在每次状态回调里重扫序列号/磁盘，只刷新运行状态行
+                self?.refreshDeviceInfo(light: true)
             }
         }
         refreshIP()
@@ -169,7 +170,9 @@ final class RootViewController: UIViewController {
         present(nav, animated: true)
     }
 
-    private func refreshDeviceInfo() {
+    private func refreshDeviceInfo(light: Bool = false) {
+        // light：连接状态频繁回调时仍走同一快照（型号/序列号已缓存，存储/内存轻量）
+        _ = light
         let rows = DeviceStatusInfo.rows(runtimeRunning: runtime.isRunning)
         var lines: [String] = ["设备信息"]
         for r in rows {
