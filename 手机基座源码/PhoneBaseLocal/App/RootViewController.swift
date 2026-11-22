@@ -8,9 +8,13 @@ final class RootViewController: UIViewController {
     private let statusLabel = UILabel()
     private let ipLabel = UILabel()
     private let selfTestLabel = UILabel()
+    private let updateLabel = UILabel()
     private let toggleButton = UIButton(type: .system)
     private let freePortButton = UIButton(type: .system)
     private let selfTestButton = UIButton(type: .system)
+    private let updateButton = UIButton(type: .system)
+    private var pendingManifest: TipaSelfUpdate.Manifest?
+    private var didAutoCheckUpdate = false
 
     init(runtime: BaseRuntime) {
         self.runtime = runtime
@@ -61,11 +65,22 @@ final class RootViewController: UIViewController {
         stylePrimary(selfTestButton, color: UIColor(red: 0.20, green: 0.45, blue: 0.85, alpha: 1))
         selfTestButton.addTarget(self, action: #selector(runSelfTest), for: .touchUpInside)
 
+        updateButton.setTitle("检查更新", for: .normal)
+        stylePrimary(updateButton, color: UIColor(red: 0.45, green: 0.35, blue: 0.85, alpha: 1))
+        updateButton.addTarget(self, action: #selector(onUpdateButton), for: .touchUpInside)
+
+        updateLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        updateLabel.textColor = UIColor(white: 0.65, alpha: 1)
+        updateLabel.numberOfLines = 0
+        updateLabel.text = "当前版本 \(TipaSelfUpdate.localVersion)"
+
         let stack = UIStackView(arrangedSubviews: [
             titleLabel,
             freePortButton,
             toggleButton,
             selfTestButton,
+            updateButton,
+            updateLabel,
             statusLabel,
             ipLabel,
             selfTestLabel,
@@ -114,8 +129,55 @@ final class RootViewController: UIViewController {
         }
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        if !didAutoCheckUpdate {
+            didAutoCheckUpdate = true
+            checkUpdate(silent: true)
+        }
+    }
+
     @objc private func onAppActive() {
         refreshIP()
+    }
+
+    @objc private func onUpdateButton() {
+        if let m = pendingManifest {
+            _ = TipaSelfUpdate.openInstall(manifest: m)
+            updateLabel.text = "已打开巨魔安装 \(m.version)\n装完回到本应用即可"
+            return
+        }
+        checkUpdate(silent: false)
+    }
+
+    private func checkUpdate(silent: Bool) {
+        if !silent {
+            updateButton.isEnabled = false
+            updateLabel.text = "正在检查更新…"
+        }
+        TipaSelfUpdate.check { [weak self] result in
+            guard let self else { return }
+            self.updateButton.isEnabled = true
+            switch result {
+            case let .upToDate(local, remote):
+                self.pendingManifest = nil
+                self.updateButton.setTitle("检查更新", for: .normal)
+                self.updateLabel.text = "已是最新 · 本机 \(local) · 线上 \(remote)"
+            case let .available(local, manifest):
+                self.pendingManifest = manifest
+                self.updateButton.setTitle("去安装 \(manifest.version)", for: .normal)
+                var text = "有新版 \(manifest.version)（本机 \(local)）"
+                if !manifest.notes.isEmpty { text += "\n\(manifest.notes)" }
+                text += "\n点上方按钮用巨魔安装"
+                self.updateLabel.text = text
+            case let .failed(msg):
+                if silent {
+                    self.updateLabel.text = "当前版本 \(TipaSelfUpdate.localVersion)\n检查失败：\(msg)"
+                } else {
+                    self.updateLabel.text = "检查失败：\(msg)\n可稍后重试"
+                }
+            }
+        }
     }
 
     private func stylePrimary(_ button: UIButton, color: UIColor) {
