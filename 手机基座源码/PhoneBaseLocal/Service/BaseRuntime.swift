@@ -36,9 +36,9 @@ final class BaseRuntime {
         screenHeight = size.height
         cachedName = DeviceIdentity.displayName
         cachedDeviceId = DeviceIdentity.deviceId
-        // CARenderServer 按 IOSurface 像素画，小于物理分辨率会裁掉右边/底边（曾硬限 720×1280 → 只显示约 90%）
-        encodeW = max(2, size.width - (size.width % 2))
-        encodeH = max(2, size.height - (size.height % 2))
+        // CARenderServer 按 IOSurface 像素画；尺寸必须=竖屏物理像素（见 DeviceIdentity.screenSize）
+        encodeW = size.width
+        encodeH = size.height
         publisher = FramePublisher(width: encodeW, height: encodeH)
         let inj = TouchInjectors.best()
         injector = inj

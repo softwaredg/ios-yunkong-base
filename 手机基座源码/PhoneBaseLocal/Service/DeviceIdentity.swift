@@ -25,10 +25,23 @@ enum DeviceIdentity {
         return id.range(of: pattern, options: .regularExpression) != nil
     }
 
+    /// 采集缓冲用的物理像素。必须竖放（宽≤高）：
+    /// `UIScreen.bounds` 会跟启动时朝向走，横着启动会变成 1334×750，
+    /// CARenderServer 按表面裁剪 → 竖屏 UI 右边/底边被切掉（半屏）。
     static func screenSize() -> (width: Int, height: Int) {
-        let bounds = UIScreen.main.bounds
-        let scale = UIScreen.main.scale
-        return (Int(bounds.width * scale), Int(bounds.height * scale))
+        let native = UIScreen.main.nativeBounds.size
+        var w = Int(native.width.rounded())
+        var h = Int(native.height.rounded())
+        if w <= 0 || h <= 0 {
+            let bounds = UIScreen.main.bounds
+            let scale = UIScreen.main.scale
+            w = Int((bounds.width * scale).rounded())
+            h = Int((bounds.height * scale).rounded())
+        }
+        if w > h { swap(&w, &h) }
+        w = max(2, w - (w % 2))
+        h = max(2, h - (h % 2))
+        return (w, h)
     }
 }
 
