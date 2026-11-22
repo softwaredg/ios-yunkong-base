@@ -12,7 +12,7 @@ enum PortOccupancy {
         var portFree: Bool = false
     }
 
-    /// TrollStore 覆盖安装 tipa 后旧进程常仍占端口：启动前结束其它 PhoneBaseLocal。
+    /// TrollStore 覆盖安装 tipa 后旧进程常仍占端口：启动前结束其它本产品/旧基座实例。
     @discardableResult
     static func retireOtherLocals() -> Result {
         var out = Result()
@@ -20,7 +20,7 @@ enum PortOccupancy {
         out.notes.append("selfPid=\(selfPid)")
         for round in 1...4 {
             let siblings = listProcesses().filter {
-                $0.pid != selfPid && $0.pid > 1 && isLocalBase($0.name)
+                $0.pid != selfPid && $0.pid > 1 && (isLocalBase($0.name) || isConflict($0.name))
             }
             if round == 1 {
                 out.seen = siblings.map { "\($0.name)(\($0.pid))" }
@@ -67,7 +67,7 @@ enum PortOccupancy {
                 killPid(p.pid, name: p.name, into: &out)
             }
 
-            for name in ["PhoneBaseDirect", "DirectPhoneBase", "LanCaptureHelper", "PhoneBase"] {
+            for name in Self.killallNames {
                 let r = runKillall(name)
                 if !r.isEmpty, round == 1 { out.notes.append(r) }
             }
@@ -103,24 +103,50 @@ enum PortOccupancy {
         return out
     }
 
+    /// killall 只打「明确的外来包」。本产品 IOSYunKongBase / PhoneBaseLocal 只按 pid 杀（排除 selfPid），避免 killall 误杀自己。
+    private static let killallNames = [
+        "PhoneBaseDirect",
+        "DirectPhoneBase",
+        "LanCaptureHelper",
+        "PhoneBase",
+        "TrollVNC",
+        "trollvncserver",
+    ]
+
     private static func isHost(_ name: String) -> Bool {
         let lower = name.lowercased()
         return lower.hasPrefix("phonebasedirect")
             || lower.hasPrefix("directphone")
             || lower == "phonebase"
+            || lower.hasPrefix("iosyunkong")
     }
 
+    /// 本产品旧实例：PhoneBaseLocal / IOSYunKongBase（正式 tipa 可执行名）等。
     private static func isLocalBase(_ name: String) -> Bool {
-        name.lowercased().hasPrefix("phonebaselocal")
+        let lower = name.lowercased()
+        if lower.hasPrefix("phonebaselocal") { return true }
+        if lower.hasPrefix("iosyunkong") { return true }
+        if lower == "iosyunkongbase" { return true }
+        return false
     }
 
     private static func isConflict(_ name: String) -> Bool {
         let lower = name.lowercased()
         if isLocalBase(name) { return true }
         if lower.hasPrefix("phonebasedirect") { return true }
-        if lower.hasPrefix("direct") { return true }
+        if lower.hasPrefix("directphone") { return true }
+        // 仅 Direct 助手族，避免误伤其它 Direct* 进程
+        if lower.hasPrefix("direct") && (lower.contains("phone") || lower.contains("base") || lower.contains("lan")) {
+            return true
+        }
         if lower.hasPrefix("lancapture") { return true }
         if lower == "phonebase" { return true }
+        // 旧 VNC 基座
+        if lower.hasPrefix("trollvnc") { return true }
+        if lower.hasPrefix("trollvncserver") { return true }
+        // 历史包名碎片（p_comm 可能截断）
+        if lower.contains("yunkong") { return true }
+        if lower.contains("phonebase") { return true }
         return false
     }
 
@@ -229,7 +255,14 @@ enum PortOccupancy {
     }
 
     private static func runKillall(_ name: String) -> String {
-        if name.lowercased().hasPrefix("phonebaselocal") { return "" }
+        let lower = name.lowercased()
+        // 绝不 killall 本产品可执行名（会连当前进程一起杀掉）
+        if lower.hasPrefix("phonebaselocal") || lower.hasPrefix("iosyunkong") { return "" }
+        if let selfExec = Bundle.main.executableURL?.lastPathComponent.lowercased(),
+           lower == selfExec || selfExec.hasPrefix(lower) || lower.hasPrefix(selfExec)
+        {
+            return ""
+        }
         var pid: pid_t = 0
         var argv: [UnsafeMutablePointer<CChar>?] = [
             strdup("/usr/bin/killall"),
