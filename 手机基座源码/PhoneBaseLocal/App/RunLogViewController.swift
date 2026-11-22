@@ -2,12 +2,15 @@ import UIKit
 
 final class RunLogViewController: UIViewController {
     private let textView = UITextView()
-    private let toolbar = UIToolbar()
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(red: 0.07, green: 0.09, blue: 0.11, alpha: 1)
         title = "运行日志"
+        // 深色页：导航栏白字，避免系统默认黑字看不清
+        navigationController?.navigationBar.barStyle = .black
+        navigationController?.navigationBar.tintColor = .white
+        navigationController?.navigationBar.titleTextAttributes = [.foregroundColor: UIColor.white]
         navigationItem.leftBarButtonItem = UIBarButtonItem(
             title: "关闭",
             style: .plain,
