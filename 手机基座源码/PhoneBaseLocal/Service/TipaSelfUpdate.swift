@@ -61,9 +61,14 @@ enum TipaSelfUpdate {
                 DispatchQueue.main.async { completion(.failed("清单解析失败")) }
                 return
             }
-            let version = String(describing: obj["version"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let url = String(describing: obj["url"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let notes = String(describing: obj["notes"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            func str(_ key: String) -> String {
+                if let s = obj[key] as? String { return s.trimmingCharacters(in: .whitespacesAndNewlines) }
+                if let n = obj[key] as? NSNumber { return n.stringValue }
+                return ""
+            }
+            let version = str("version")
+            let url = str("url")
+            let notes = str("notes")
             guard !version.isEmpty, url.hasPrefix("https://") else {
                 DispatchQueue.main.async { completion(.failed("清单无效")) }
                 return
