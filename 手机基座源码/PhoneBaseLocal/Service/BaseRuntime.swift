@@ -325,6 +325,7 @@ final class BaseRuntime {
     }
 
     private func notify(_ text: String) {
+        AppRunLog.shared.append(text)
         onStatus?(text)
     }
 
