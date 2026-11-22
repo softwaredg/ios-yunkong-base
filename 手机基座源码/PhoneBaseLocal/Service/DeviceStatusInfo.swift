@@ -9,15 +9,18 @@ enum DeviceStatusInfo {
         let value: String
     }
 
+    private static var cachedSerial: String?
+    private static var didCacheSerial = false
+    private static var cachedModel: String?
+    private static var cachedScreen: String?
+
     static func rows(runtimeRunning: Bool) -> [Row] {
-        let screen = DeviceIdentity.screenSize()
-        let scale = UIScreen.main.scale
-        return [
+        [
             Row(title: "运行状态", value: runtimeRunning ? "运行正常" : "服务已停止"),
             Row(title: "系统版本", value: "iOS \(UIDevice.current.systemVersion)"),
-            Row(title: "设备型号", value: marketingModel()),
-            Row(title: "序列号", value: serialNumber() ?? "不可用"),
-            Row(title: "屏幕分辨率", value: "\(screen.width) × \(screen.height) (\(fmtScale(scale)))"),
+            Row(title: "设备型号", value: modelLabel()),
+            Row(title: "序列号", value: serialLabel()),
+            Row(title: "屏幕分辨率", value: screenLabel()),
             Row(title: "存储状态", value: storageUsage()),
             Row(title: "内存状态", value: memoryUsage()),
             Row(title: "应用版本", value: TipaSelfUpdate.localVersion),
@@ -38,7 +41,8 @@ enum DeviceStatusInfo {
         }
     }
 
-    private static func marketingModel() -> String {
+    private static func modelLabel() -> String {
+        if let cachedModel { return cachedModel }
         let machine = machineIdentifier()
         let map: [String: String] = [
             "iPhone10,3": "iPhone X", "iPhone10,6": "iPhone X",
@@ -55,19 +59,45 @@ enum DeviceStatusInfo {
             "iPhone15,4": "iPhone 15", "iPhone15,5": "iPhone 15 Plus",
             "iPhone16,1": "iPhone 15 Pro", "iPhone16,2": "iPhone 15 Pro Max",
         ]
-        if let name = map[machine] { return "\(name) (\(machine))" }
-        return "\(UIDevice.current.model) (\(machine))"
+        let value: String
+        if let name = map[machine] {
+            value = "\(name) (\(machine))"
+        } else {
+            value = "\(UIDevice.current.model) (\(machine))"
+        }
+        cachedModel = value
+        return value
     }
 
-    private static func serialNumber() -> String? {
-        // 巨魔环境优先 MobileGestalt；失败再试 IOKit
+    private static func screenLabel() -> String {
+        if let cachedScreen { return cachedScreen }
+        let screen = DeviceIdentity.screenSize()
+        let value = "\(screen.width) × \(screen.height) (\(fmtScale(UIScreen.main.scale)))"
+        cachedScreen = value
+        return value
+    }
+
+    private static func serialLabel() -> String {
+        if didCacheSerial { return cachedSerial ?? "不可用" }
+        didCacheSerial = true
+        cachedSerial = readSerialNumber()
+        return cachedSerial ?? "不可用"
+    }
+
+    private static func readSerialNumber() -> String? {
+        // 巨魔环境优先 MobileGestalt；失败再试 IOKit（均 dlsym，避免 SDK 模块依赖）
         let RTLD_DEFAULT = UnsafeMutableRawPointer(bitPattern: -2)
         typealias MGFn = @convention(c) (CFString) -> Unmanaged<CFTypeRef>?
         if let sym = dlsym(RTLD_DEFAULT, "MGCopyAnswer") {
             let mg = unsafeBitCast(sym, to: MGFn.self)
-            if let cf = mg("SerialNumber" as CFString)?.takeRetainedValue() {
-                let s = String(describing: cf).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !s.isEmpty, s != "nil" { return s }
+            if let raw = mg("SerialNumber" as CFString)?.takeRetainedValue() {
+                if let s = raw as? String {
+                    let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !t.isEmpty { return t }
+                } else {
+                    let t = String(describing: raw).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !t.isEmpty, t != "nil" { return t }
+                }
             }
         }
 
@@ -87,6 +117,7 @@ enum DeviceStatusInfo {
         defer { _ = release(service) }
         guard let cf = createProp(service, "IOPlatformSerialNumber" as CFString, kCFAllocatorDefault, 0)?
             .takeRetainedValue() else { return nil }
+        if let s = cf as? String, !s.isEmpty { return s }
         let s = String(describing: cf).trimmingCharacters(in: .whitespacesAndNewlines)
         return s.isEmpty ? nil : s
     }
