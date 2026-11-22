@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 final class ControlHub {
     private let deviceId: String
@@ -180,9 +181,30 @@ final class ControlHub {
             }
             injector.injectKey(key)
             ack(session, seq: seq, ok: true)
+        case "open-url":
+            // PC「更新基座」：直接跳巨魔，不经 Safari
+            let seq = intVal(obj["seq"]) ?? 0
+            let raw = (obj["url"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let url = URL(string: raw), Self.allowedOpenURL(url) else {
+                ack(session, seq: seq, ok: false, error: "bad url")
+                return
+            }
+            DispatchQueue.main.async {
+                UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            }
+            AppRunLog.shared.append("控制通道打开 URL scheme=\(url.scheme ?? "?")")
+            ack(session, seq: seq, ok: true)
         default:
             break
         }
+    }
+
+    /// 仅允许巨魔安装 / 本应用唤起，避免被当成任意 URL 跳板
+    private static func allowedOpenURL(_ url: URL) -> Bool {
+        let scheme = (url.scheme ?? "").lowercased()
+        if scheme == "apple-magnifier" { return true }
+        if scheme == "phonebase" { return true }
+        return false
     }
 
     private func doubleVal(_ any: Any?) -> Double? {
