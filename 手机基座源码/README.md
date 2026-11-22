@@ -23,5 +23,3 @@
 须 Mac / GitHub Actions + **TrollStore**。源码在 `PhoneBaseLocal/`。打包脚本仍产出 `IOSYunKongBase.app`。
 
 **不要擅自打包**——等产品明确说「打包」再打。
-
-旧 TVH4 树已归档到 `归档/基座研发/旧TVH4基座-*`。

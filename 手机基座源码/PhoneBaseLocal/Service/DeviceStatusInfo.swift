@@ -4,9 +4,33 @@ import Darwin
 
 /// 本地基座页「设备信息」快照。
 enum DeviceStatusInfo {
+    enum Kind {
+        case plain
+        case status
+        case meter
+    }
+
     struct Row {
         let title: String
         let value: String
+        let kind: Kind
+        /// 0...1 for meter rows.
+        let fraction: Double
+        let statusOn: Bool
+
+        init(
+            title: String,
+            value: String,
+            kind: Kind = .plain,
+            fraction: Double = 0,
+            statusOn: Bool = false
+        ) {
+            self.title = title
+            self.value = value
+            self.kind = kind
+            self.fraction = min(1, max(0, fraction))
+            self.statusOn = statusOn
+        }
     }
 
     private static var cachedSerial: String?
@@ -15,15 +39,21 @@ enum DeviceStatusInfo {
     private static var cachedScreen: String?
 
     static func rows(runtimeRunning: Bool) -> [Row] {
-        [
-            Row(title: "运行状态", value: runtimeRunning ? "运行正常" : "服务已停止"),
+        let storage = storageSnapshot()
+        let memory = memorySnapshot()
+        return [
+            Row(
+                title: "运行状态",
+                value: runtimeRunning ? "运行正常" : "服务已停止",
+                kind: .status,
+                statusOn: runtimeRunning
+            ),
             Row(title: "系统版本", value: "iOS \(UIDevice.current.systemVersion)"),
             Row(title: "设备型号", value: modelLabel()),
             Row(title: "序列号", value: serialLabel()),
             Row(title: "屏幕分辨率", value: screenLabel()),
-            Row(title: "存储状态", value: storageUsage()),
-            Row(title: "内存状态", value: memoryUsage()),
-            Row(title: "应用版本", value: TipaSelfUpdate.localVersion),
+            Row(title: "存储", value: storage.label, kind: .meter, fraction: storage.fraction),
+            Row(title: "内存", value: memory.label, kind: .meter, fraction: memory.fraction),
             Row(title: "应用包名", value: Bundle.main.bundleIdentifier ?? "?"),
         ]
     }
@@ -122,19 +152,20 @@ enum DeviceStatusInfo {
         return s.isEmpty ? nil : s
     }
 
-    private static func storageUsage() -> String {
+    private static func storageSnapshot() -> (label: String, fraction: Double) {
         do {
             let attrs = try FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())
             let free = (attrs[.systemFreeSize] as? NSNumber)?.uint64Value ?? 0
             let total = (attrs[.systemSize] as? NSNumber)?.uint64Value ?? 0
             let used = total > free ? total - free : 0
-            return "\(fmtBytes(used)) / \(fmtBytes(total))"
+            let fraction = total > 0 ? Double(used) / Double(total) : 0
+            return ("已用 \(fmtBytes(used)) / \(fmtBytes(total))", fraction)
         } catch {
-            return "不可用"
+            return ("不可用", 0)
         }
     }
 
-    private static func memoryUsage() -> String {
+    private static func memorySnapshot() -> (label: String, fraction: Double) {
         let total = ProcessInfo.processInfo.physicalMemory
         let available = UInt64(os_proc_available_memory())
         let used: UInt64
@@ -143,7 +174,8 @@ enum DeviceStatusInfo {
         } else {
             used = MemoryGuard.physFootprint()
         }
-        return "\(fmtBytes(used)) / \(fmtBytes(total))"
+        let fraction = total > 0 ? Double(used) / Double(total) : 0
+        return ("已用 \(fmtBytes(used)) / \(fmtBytes(total))", fraction)
     }
 
     private static func fmtBytes(_ n: UInt64) -> String {

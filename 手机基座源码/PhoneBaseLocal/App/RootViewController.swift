@@ -4,17 +4,22 @@ final class RootViewController: UIViewController {
     private let runtime: BaseRuntime
     private let scrollView = UIScrollView()
     private let contentView = UIView()
-    private let titleLabel = UILabel()
-    private let statusLabel = UILabel()
-    private let ipLabel = UILabel()
-    private let selfTestLabel = UILabel()
-    private let updateLabel = UILabel()
-    private let deviceInfoLabel = UILabel()
+
+    private let heroCard = BaseChrome.card()
+    private let statusDot = UIView()
+    private let statusTitle = UILabel()
+    private let statusDetail = UILabel()
+    private let connectCaption = UILabel()
+    private let connectValue = UILabel()
+
     private let toggleButton = UIButton(type: .system)
-    private let freePortButton = UIButton(type: .system)
-    private let selfTestButton = UIButton(type: .system)
     private let updateButton = UIButton(type: .system)
     private let runLogButton = UIButton(type: .system)
+    private let selfTestButton = UIButton(type: .system)
+
+    private let updateHint = UILabel()
+    private let deviceCard = BaseChrome.card()
+    private let deviceStack = UIStackView()
     private var pendingManifest: TipaSelfUpdate.Manifest?
     private var didAutoCheckUpdate = false
 
@@ -28,7 +33,7 @@ final class RootViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(red: 0.07, green: 0.09, blue: 0.11, alpha: 1)
+        view.backgroundColor = BaseChrome.bg
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.alwaysBounceVertical = true
@@ -37,75 +42,142 @@ final class RootViewController: UIViewController {
         view.addSubview(scrollView)
         scrollView.addSubview(contentView)
 
-        titleLabel.text = "本地基座"
-        titleLabel.font = .systemFont(ofSize: 28, weight: .bold)
-        titleLabel.textColor = .white
+        statusDot.translatesAutoresizingMaskIntoConstraints = false
+        statusDot.layer.cornerRadius = 5
+        statusDot.backgroundColor = BaseChrome.textMuted
 
-        statusLabel.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
-        statusLabel.textColor = UIColor(white: 0.75, alpha: 1)
-        statusLabel.numberOfLines = 0
+        statusTitle.font = .systemFont(ofSize: 22, weight: .semibold)
+        statusTitle.textColor = BaseChrome.textPrimary
 
-        ipLabel.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        ipLabel.textColor = UIColor(white: 0.55, alpha: 1)
-        ipLabel.numberOfLines = 0
+        statusDetail.font = .systemFont(ofSize: 14, weight: .regular)
+        statusDetail.textColor = BaseChrome.textSecondary
+        statusDetail.numberOfLines = 0
 
-        selfTestLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        selfTestLabel.textColor = UIColor(red: 0.85, green: 0.75, blue: 0.35, alpha: 1)
-        selfTestLabel.numberOfLines = 0
-        selfTestLabel.text = "若启动失败 bind(48)：向下滑，点「释放端口占用」"
+        connectCaption.text = "电脑添加地址"
+        connectCaption.font = .systemFont(ofSize: 12, weight: .semibold)
+        connectCaption.textColor = BaseChrome.textMuted
 
-        // 按钮放上面，避免被超长自检日志顶出屏幕
-        freePortButton.setTitle("释放端口占用", for: .normal)
-        stylePrimary(freePortButton, color: UIColor(red: 0.85, green: 0.45, blue: 0.15, alpha: 1))
-        freePortButton.addTarget(self, action: #selector(freePort), for: .touchUpInside)
+        connectValue.font = .monospacedSystemFont(ofSize: 20, weight: .medium)
+        connectValue.textColor = BaseChrome.textPrimary
+        connectValue.numberOfLines = 2
+        connectValue.adjustsFontSizeToFitWidth = true
+        connectValue.minimumScaleFactor = 0.7
 
-        toggleButton.setTitle(runtime.isRunning ? "停止服务" : "启动服务", for: .normal)
-        stylePrimary(toggleButton, color: UIColor(red: 0.18, green: 0.62, blue: 0.48, alpha: 1))
+        BaseChrome.applyFilled(toggleButton, title: runtime.isRunning ? "停止服务" : "启动服务")
         toggleButton.addTarget(self, action: #selector(toggle), for: .touchUpInside)
 
-        selfTestButton.setTitle("本机自检", for: .normal)
-        stylePrimary(selfTestButton, color: UIColor(red: 0.20, green: 0.45, blue: 0.85, alpha: 1))
-        selfTestButton.addTarget(self, action: #selector(runSelfTest), for: .touchUpInside)
-
-        updateButton.setTitle("检查更新", for: .normal)
-        stylePrimary(updateButton, color: UIColor(red: 0.45, green: 0.35, blue: 0.85, alpha: 1))
+        BaseChrome.applyAction(updateButton, title: "检查更新", color: BaseChrome.actionUpdate)
         updateButton.addTarget(self, action: #selector(onUpdateButton), for: .touchUpInside)
 
-        updateLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        updateLabel.textColor = UIColor(white: 0.65, alpha: 1)
-        updateLabel.numberOfLines = 0
-        updateLabel.text = "当前版本 \(TipaSelfUpdate.localVersion)"
-
-        runLogButton.setTitle("运行日志", for: .normal)
-        stylePrimary(runLogButton, color: UIColor(red: 0.35, green: 0.40, blue: 0.48, alpha: 1))
+        BaseChrome.applyAction(runLogButton, title: "运行日志", color: BaseChrome.actionLog)
         runLogButton.addTarget(self, action: #selector(openRunLog), for: .touchUpInside)
 
-        deviceInfoLabel.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        deviceInfoLabel.textColor = UIColor(white: 0.78, alpha: 1)
-        deviceInfoLabel.numberOfLines = 0
-        deviceInfoLabel.backgroundColor = UIColor(white: 0.12, alpha: 1)
-        deviceInfoLabel.layer.cornerRadius = 10
-        deviceInfoLabel.clipsToBounds = true
-        deviceInfoLabel.textAlignment = .left
+        BaseChrome.applyAction(selfTestButton, title: "本机自检", color: BaseChrome.actionTest)
+        selfTestButton.addTarget(self, action: #selector(onSelfTestTap), for: .touchUpInside)
 
-        let stack = UIStackView(arrangedSubviews: [
-            titleLabel,
-            freePortButton,
-            toggleButton,
-            selfTestButton,
-            updateButton,
-            updateLabel,
-            runLogButton,
-            deviceInfoLabel,
-            statusLabel,
-            ipLabel,
-            selfTestLabel,
+        updateHint.font = .systemFont(ofSize: 12, weight: .regular)
+        updateHint.textColor = BaseChrome.textMuted
+        updateHint.numberOfLines = 0
+        updateHint.textAlignment = .center
+        updateHint.text = "当前版本 \(TipaSelfUpdate.localVersion)"
+
+        deviceStack.axis = .vertical
+        deviceStack.spacing = 10
+        deviceStack.translatesAutoresizingMaskIntoConstraints = false
+
+        buildLayout()
+        wireRuntime()
+        refreshIP()
+        refreshDeviceInfo()
+        refreshHero()
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(onAppActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            self?.runSelfTest(silent: true)
+        }
+    }
+
+    @objc private func onSelfTestTap() {
+        runSelfTest(silent: false)
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        refreshDeviceInfo()
+        if !didAutoCheckUpdate {
+            didAutoCheckUpdate = true
+            checkUpdate(silent: true)
+        }
+    }
+
+    private func buildLayout() {
+        let statusRow = UIStackView(arrangedSubviews: [statusDot, statusTitle])
+        statusRow.axis = .horizontal
+        statusRow.alignment = .center
+        statusRow.spacing = 10
+        NSLayoutConstraint.activate([
+            statusDot.widthAnchor.constraint(equalToConstant: 10),
+            statusDot.heightAnchor.constraint(equalToConstant: 10),
         ])
-        stack.axis = .vertical
-        stack.spacing = 14
-        stack.alignment = .fill
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(stack)
+
+        statusTitle.textAlignment = .center
+        statusDetail.textAlignment = .center
+        connectCaption.textAlignment = .center
+        connectValue.textAlignment = .center
+
+        let heroInner = UIStackView(arrangedSubviews: [
+            statusRow, statusDetail, connectCaption, connectValue, updateHint,
+        ])
+        heroInner.axis = .vertical
+        heroInner.spacing = 8
+        heroInner.alignment = .center
+        heroInner.setCustomSpacing(16, after: statusDetail)
+        heroInner.setCustomSpacing(4, after: connectCaption)
+        heroInner.setCustomSpacing(14, after: connectValue)
+        statusDetail.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        connectValue.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        updateHint.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        heroInner.translatesAutoresizingMaskIntoConstraints = false
+        heroCard.addSubview(heroInner)
+
+        let actionsTop = UIStackView(arrangedSubviews: [toggleButton, updateButton])
+        actionsTop.axis = .horizontal
+        actionsTop.spacing = 10
+        actionsTop.distribution = .fillEqually
+
+        let actionsBottom = UIStackView(arrangedSubviews: [runLogButton, selfTestButton])
+        actionsBottom.axis = .horizontal
+        actionsBottom.spacing = 10
+        actionsBottom.distribution = .fillEqually
+
+        let actions = UIStackView(arrangedSubviews: [actionsTop, actionsBottom])
+        actions.axis = .vertical
+        actions.spacing = 10
+        actions.distribution = .fillEqually
+
+        let deviceTitle = BaseChrome.sectionLabel("设备")
+        deviceCard.addSubview(deviceStack)
+
+        let root = UIStackView(arrangedSubviews: [
+            heroCard,
+            actions,
+            deviceTitle,
+            deviceCard,
+        ])
+        root.axis = .vertical
+        root.spacing = 16
+        root.alignment = .fill
+        root.setCustomSpacing(20, after: heroCard)
+        root.setCustomSpacing(24, after: actions)
+        root.setCustomSpacing(8, after: deviceTitle)
+        root.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(root)
 
         NSLayoutConstraint.activate([
             scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
@@ -119,75 +191,105 @@ final class RootViewController: UIViewController {
             contentView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
             contentView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
 
-            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 24),
-            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
-            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
-            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -40),
+            root.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 24),
+            root.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            root.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            root.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -32),
+
+            heroInner.topAnchor.constraint(equalTo: heroCard.topAnchor, constant: 18),
+            heroInner.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 18),
+            heroInner.trailingAnchor.constraint(equalTo: heroCard.trailingAnchor, constant: -18),
+            heroInner.bottomAnchor.constraint(equalTo: heroCard.bottomAnchor, constant: -18),
+            statusDetail.widthAnchor.constraint(equalTo: heroInner.widthAnchor),
+            connectCaption.widthAnchor.constraint(equalTo: heroInner.widthAnchor),
+            connectValue.widthAnchor.constraint(equalTo: heroInner.widthAnchor),
+            updateHint.widthAnchor.constraint(equalTo: heroInner.widthAnchor),
+
+            deviceStack.topAnchor.constraint(equalTo: deviceCard.topAnchor, constant: 14),
+            deviceStack.leadingAnchor.constraint(equalTo: deviceCard.leadingAnchor, constant: 16),
+            deviceStack.trailingAnchor.constraint(equalTo: deviceCard.trailingAnchor, constant: -16),
+            deviceStack.bottomAnchor.constraint(equalTo: deviceCard.bottomAnchor, constant: -14),
+
+            toggleButton.heightAnchor.constraint(equalToConstant: 48),
+            updateButton.heightAnchor.constraint(equalTo: toggleButton.heightAnchor),
+            runLogButton.heightAnchor.constraint(equalTo: toggleButton.heightAnchor),
+            selfTestButton.heightAnchor.constraint(equalTo: toggleButton.heightAnchor),
         ])
-
-        runtime.onStatus = { [weak self] text in
-            DispatchQueue.main.async {
-                self?.statusLabel.text = text
-                self?.toggleButton.setTitle(self?.runtime.isRunning == true ? "停止服务" : "启动服务", for: .normal)
-                // 不在每次状态回调里重扫序列号/磁盘，只刷新运行状态行
-                self?.refreshDeviceInfo(light: true)
-            }
-        }
-        refreshIP()
-        refreshDeviceInfo()
-        // 勿用 3s 主线程轮询：和 CADisplayLink 抢主线程 → 投屏周期性卡一下
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(onAppActive),
-            name: UIApplication.didBecomeActiveNotification,
-            object: nil
-        )
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            self?.runSelfTest()
-        }
     }
 
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        refreshDeviceInfo()
-        if !didAutoCheckUpdate {
-            didAutoCheckUpdate = true
-            checkUpdate(silent: true)
+    private func wireRuntime() {
+        runtime.onStatus = { [weak self] text in
+            DispatchQueue.main.async {
+                self?.statusDetail.text = text
+                self?.refreshHero()
+                self?.refreshDeviceInfo(light: true)
+            }
         }
     }
 
     @objc private func onAppActive() {
         refreshIP()
         refreshDeviceInfo()
+        refreshHero()
     }
 
     @objc private func openRunLog() {
         let vc = RunLogViewController()
         let nav = UINavigationController(rootViewController: vc)
         nav.navigationBar.prefersLargeTitles = false
-        nav.modalPresentationStyle = .pageSheet
+        nav.modalPresentationStyle = .fullScreen
+        nav.modalTransitionStyle = .coverVertical
         present(nav, animated: true)
     }
 
+    private func refreshHero() {
+        let running = runtime.isRunning
+        statusDot.backgroundColor = running ? BaseChrome.accent : BaseChrome.textMuted
+        statusTitle.text = running ? "运行中" : "已停止"
+        BaseChrome.applyFilled(
+            toggleButton,
+            title: running ? "停止服务" : "启动服务",
+            color: running ? BaseChrome.danger : BaseChrome.accent,
+            ink: running ? .white : BaseChrome.accentInk
+        )
+        if statusDetail.text?.isEmpty != false {
+            statusDetail.text = running ? "电脑可连接本机投屏" : "启动后，PC 端才能拉到画面"
+        }
+    }
+
     private func refreshDeviceInfo(light: Bool = false) {
-        // light：连接状态频繁回调时仍走同一快照（型号/序列号已缓存，存储/内存轻量）
         _ = light
         let rows = DeviceStatusInfo.rows(runtimeRunning: runtime.isRunning)
-        var lines: [String] = ["设备信息"]
-        for r in rows {
-            let mark = r.title == "运行状态" && runtime.isRunning ? "● " : "  "
-            lines.append("\(mark)\(r.title)：\(r.value)")
+        deviceStack.arrangedSubviews.forEach {
+            deviceStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
         }
-        // 左右内边距用空格近似（UILabel 无 contentInset）
-        deviceInfoLabel.text = "\n  " + lines.joined(separator: "\n  ") + "\n"
+        deviceStack.spacing = 12
+        for (i, r) in rows.enumerated() {
+            switch r.kind {
+            case .status:
+                deviceStack.addArrangedSubview(
+                    BaseChrome.statusRow(title: r.title, value: r.value, on: r.statusOn)
+                )
+            case .meter:
+                deviceStack.addArrangedSubview(
+                    BaseChrome.meterRow(title: r.title, value: r.value, fraction: r.fraction)
+                )
+            case .plain:
+                deviceStack.addArrangedSubview(BaseChrome.kvRow(title: r.title, value: r.value))
+            }
+            if i < rows.count - 1 {
+                deviceStack.addArrangedSubview(BaseChrome.divider())
+            }
+        }
     }
 
     @objc private func onUpdateButton() {
         if let m = pendingManifest {
-            _ = TipaSelfUpdate.openInstall(manifest: m)
-            updateLabel.text = "已打开巨魔安装 \(m.version)\n装完回到本应用即可"
-            AppRunLog.shared.append("打开巨魔安装 \(m.version)")
+            let guide = TipaInstallGuideViewController(manifest: m)
+            guide.modalPresentationStyle = .fullScreen
+            present(guide, animated: true)
+            updateHint.text = "正在打开巨魔安装 \(m.version)…"
             return
         }
         checkUpdate(silent: false)
@@ -196,7 +298,7 @@ final class RootViewController: UIViewController {
     private func checkUpdate(silent: Bool) {
         if !silent {
             updateButton.isEnabled = false
-            updateLabel.text = "正在检查更新…"
+            updateHint.text = "正在检查更新…"
             AppRunLog.shared.append("开始检查更新")
         }
         TipaSelfUpdate.check { [weak self] result in
@@ -205,105 +307,63 @@ final class RootViewController: UIViewController {
             switch result {
             case let .upToDate(local, remote):
                 self.pendingManifest = nil
-                self.updateButton.setTitle("检查更新", for: .normal)
-                self.updateLabel.text = "已是最新 · 本机 \(local) · 线上 \(remote)"
+                BaseChrome.applyAction(self.updateButton, title: "检查更新", color: BaseChrome.actionUpdate)
+                self.updateHint.text = "已是最新 · 本机 \(local) · 线上 \(remote)"
                 AppRunLog.shared.append("已是最新 local=\(local) remote=\(remote)")
             case let .available(local, manifest):
                 self.pendingManifest = manifest
-                self.updateButton.setTitle("去安装 \(manifest.version)", for: .normal)
+                BaseChrome.applyAction(
+                    self.updateButton,
+                    title: "去安装 \(manifest.version)",
+                    color: BaseChrome.warn
+                )
                 var text = "有新版 \(manifest.version)（本机 \(local)）"
                 if !manifest.notes.isEmpty { text += "\n\(manifest.notes)" }
                 text += "\n点上方按钮用巨魔安装"
-                self.updateLabel.text = text
+                self.updateHint.text = text
                 AppRunLog.shared.append("发现新版 \(manifest.version)（本机 \(local)）")
             case let .failed(msg):
                 if silent {
-                    self.updateLabel.text = "当前版本 \(TipaSelfUpdate.localVersion)\n检查失败：\(msg)"
+                    self.updateHint.text = "当前版本 \(TipaSelfUpdate.localVersion)\n检查失败：\(msg)"
                 } else {
-                    self.updateLabel.text = "检查失败：\(msg)\n可稍后重试"
+                    self.updateHint.text = "检查失败：\(msg)\n可稍后重试"
                 }
                 AppRunLog.shared.append("检查更新失败：\(msg)")
             }
         }
     }
 
-    private func stylePrimary(_ button: UIButton, color: UIColor) {
-        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
-        button.backgroundColor = color
-        button.setTitleColor(.white, for: .normal)
-        button.layer.cornerRadius = 10
-        button.contentEdgeInsets = UIEdgeInsets(top: 12, left: 18, bottom: 12, right: 18)
-    }
-
     private func refreshIP() {
-        let ips = LanAddress.ipv4List().joined(separator: "\n")
-        let tip = ips.isEmpty
-            ? "等待局域网地址…\n请确认手机已连 Wi‑Fi（勿用访客网络）"
-            : "电脑端「手动添加」填：\n\(ips.split(separator: "\n").first ?? "")\n端口 \(runtime.port)"
-        ipLabel.text = "端口 \(runtime.port)\n\(ips.isEmpty ? "无局域网 IP" : ips)\n\n\(tip)"
+        let ips = LanAddress.ipv4List()
+        let first = ips.first ?? ""
+        if first.isEmpty {
+            connectValue.text = "等待 Wi‑Fi 地址…"
+            connectValue.textColor = BaseChrome.textMuted
+        } else {
+            connectValue.text = "\(first):\(runtime.port)"
+            connectValue.textColor = BaseChrome.textPrimary
+        }
     }
 
     @objc private func toggle() {
         if runtime.isRunning {
             AppRunLog.shared.append("用户停止服务")
             runtime.stop()
-            toggleButton.setTitle("启动服务", for: .normal)
         } else {
             AppRunLog.shared.append("用户启动服务")
             runtime.start()
-            toggleButton.setTitle(runtime.isRunning ? "停止服务" : "启动服务", for: .normal)
         }
         refreshIP()
         refreshDeviceInfo()
+        refreshHero()
     }
 
-    @objc private func freePort() {
-        freePortButton.isEnabled = false
-        statusLabel.text = "正在释放 \(runtime.port) 端口占用…"
-        AppRunLog.shared.append("开始释放端口 \(runtime.port)")
-        if runtime.isRunning { runtime.stop() }
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            let result = PortOccupancy.freePort(self.runtime.port)
-            DispatchQueue.main.async {
-                var lines: [String] = ["释放端口结果："]
-                if !result.occupantHint.isEmpty {
-                    lines.append(result.occupantHint)
-                }
-                if result.killed.isEmpty {
-                    lines.append("未杀到冲突进程（可能无权限，请卸载 Direct/旧基座）")
-                } else {
-                    lines.append("已结束：\(result.killed.joined(separator: ", "))")
-                }
-                lines.append(contentsOf: result.notes)
-
-                let ok = self.runtime.start(notifyStatus: false)
-                self.toggleButton.setTitle(self.runtime.isRunning ? "停止服务" : "启动服务", for: .normal)
-                if ok {
-                    lines.append("已重新启动本服务 ✓")
-                } else {
-                    lines.append("启动仍失败：手机上的 Direct(LanCaptureHelper) 占着 11019")
-                    lines.append("请到 TrollStore 卸载 Direct / PhoneBaseDirect 后重开本应用")
-                }
-                let joined = lines.joined(separator: "\n")
-                self.statusLabel.text = joined
-                AppRunLog.shared.append(joined)
-                self.freePortButton.isEnabled = true
-                self.refreshIP()
-                self.refreshDeviceInfo()
-                self.runSelfTest()
-            }
-        }
-    }
-
-    @objc private func runSelfTest() {
-        selfTestLabel.text = "自检中…"
+    private func runSelfTest(silent: Bool) {
+        selfTestButton.isEnabled = false
         let port = runtime.port
         let lan = LanAddress.ipv4List().first
         let oursRunning = runtime.isRunning
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // 只取摘要，避免整段商业基座 JSON 撑爆界面
             let local = Self.fetchSummary("http://127.0.0.1:\(port)/api/health")
             let lanResult: String
             if let lan {
@@ -314,9 +374,14 @@ final class RootViewController: UIViewController {
             let warn = Self.conflictHint(localBody: local, oursRunning: oursRunning)
             DispatchQueue.main.async {
                 let summary =
-                    "本机自检\n127.0.0.1 → \(local)\nLAN → \(lanResult)\n\(warn)\n可向下滑动查看更多"
-                self?.selfTestLabel.text = summary
-                AppRunLog.shared.append("自检 127.0.0.1 → \(local)；LAN → \(lanResult)")
+                    "自检\n127.0.0.1 → \(local)\nLAN → \(lanResult)\(warn)"
+                AppRunLog.shared.append(summary)
+                if !silent {
+                    self?.statusDetail.text = warn.isEmpty
+                        ? "自检完成，详情见运行日志"
+                        : "自检发现问题，详情见运行日志"
+                }
+                self?.selfTestButton.isEnabled = true
             }
         }
     }
@@ -330,12 +395,12 @@ final class RootViewController: UIViewController {
             || (lower.contains("foreign") || lower.contains("其它基座"))
             || (lower.contains("\"protocol\"") && !lower.contains("lan-phonebase") && lower.contains("http 200"))
         if foreign || lower.contains("其它基座") {
-            return "\n⚠️ 11019 被其它 PhoneBase/Direct 占用\n请点上方「释放端口占用」\n"
+            return "\n\n11019 被其它 PhoneBase/Direct 占用\n请到 TrollStore 卸载 Direct / 旧基座后重开"
         }
         if !oursRunning, lower.contains("http 200") {
-            return "\n⚠️ 11019 被 Direct 助手占用（也会回 lan-phonebase）\n先点「释放端口占用」；不行就卸载 Direct\n"
+            return "\n\n11019 被 Direct 助手占用\n请到 TrollStore 卸载 Direct 后重开本应用"
         }
-        return "\n"
+        return ""
     }
 
     private static func fetchSummary(_ url: String) -> String {

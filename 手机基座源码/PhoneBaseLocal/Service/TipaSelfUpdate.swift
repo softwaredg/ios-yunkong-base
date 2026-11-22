@@ -85,9 +85,14 @@ enum TipaSelfUpdate {
     }
 
     @discardableResult
-    static func openInstall(manifest: Manifest) -> Bool {
-        guard let u = trollInstallURL(tipaHttpsURL: manifest.url) else { return false }
-        UIApplication.shared.open(u, options: [:], completionHandler: nil)
+    static func openInstall(manifest: Manifest, completion: ((Bool) -> Void)? = nil) -> Bool {
+        guard let u = trollInstallURL(tipaHttpsURL: manifest.url) else {
+            completion?(false)
+            return false
+        }
+        UIApplication.shared.open(u, options: [:]) { ok in
+            DispatchQueue.main.async { completion?(ok) }
+        }
         return true
     }
 }
