@@ -28,14 +28,14 @@ final class TipaInstallGuideViewController: UIViewController {
         titleLabel.textAlignment = .center
 
         detailLabel.text = manifest.notes.isEmpty
-            ? "将打开巨魔（TrollStore）安装最新 tipa。\n在巨魔里点「安装」，装完再回到本应用。"
-            : "\(manifest.notes)\n\n将打开巨魔安装。装完后回到本应用即可。"
+            ? "点下方按钮打开巨魔（TrollStore）安装。\n在巨魔里点「安装」，装完再回到本应用。\n若跳到「放大镜」：巨魔设置里打开 URL Scheme。"
+            : "\(manifest.notes)\n\n点下方按钮打开巨魔安装。装完后回到本应用即可。\n若跳到「放大镜」：巨魔设置里打开 URL Scheme。"
         detailLabel.font = .systemFont(ofSize: 15, weight: .regular)
         detailLabel.textColor = BaseChrome.textSecondary
         detailLabel.textAlignment = .center
         detailLabel.numberOfLines = 0
 
-        statusLabel.text = "准备打开巨魔…"
+        statusLabel.text = "请点「打开巨魔安装」"
         statusLabel.font = .systemFont(ofSize: 13, weight: .regular)
         statusLabel.textColor = BaseChrome.textMuted
         statusLabel.textAlignment = .center
@@ -80,9 +80,10 @@ final class TipaInstallGuideViewController: UIViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        // Best-effort auto open (Kumone/Dopamine-style). Primary path is the button tap.
         if !didAutoOpen {
             didAutoOpen = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
                 self?.openTroll()
             }
         }
@@ -96,6 +97,7 @@ final class TipaInstallGuideViewController: UIViewController {
             openButton.isEnabled = true
             return
         }
+        // Do not gate on canOpenURL — false negatives are common (Kumone).
         UIApplication.shared.open(url, options: [:]) { [weak self] ok in
             DispatchQueue.main.async {
                 self?.openButton.isEnabled = true
@@ -103,7 +105,8 @@ final class TipaInstallGuideViewController: UIViewController {
                     self?.statusLabel.text = "已跳转巨魔。请在巨魔中点「安装」，完成后回到本应用。"
                     AppRunLog.shared.append("打开巨魔安装 \(self?.manifest.version ?? "")")
                 } else {
-                    self?.statusLabel.text = "无法打开巨魔。请确认已安装 TrollStore，或稍后重试。"
+                    self?.statusLabel.text =
+                        "无法打开巨魔。请打开 TrollStore → 设置 → 打开 URL Scheme，再点本页按钮。"
                     AppRunLog.shared.append("打开巨魔失败 \(self?.manifest.version ?? "")")
                 }
             }
