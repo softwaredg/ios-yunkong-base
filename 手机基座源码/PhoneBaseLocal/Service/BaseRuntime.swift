@@ -29,6 +29,9 @@ final class BaseRuntime {
     private var orientationObserver: NSObjectProtocol?
     private var orientationPoll: DispatchSourceTimer?
     private var lastPublishedOrientation = 1
+    /// 投屏/探活会狂 accept，运行日志按 IP 节流
+    private var lastConnLogAt: [String: Date] = [:]
+    private let connLogMinInterval: TimeInterval = 12
 
     private init() {
         let size = DeviceIdentity.screenSize()
@@ -73,8 +76,11 @@ final class BaseRuntime {
                 return Data("{\"ok\":true,\"protocol\":\"lan-phonebase\",\"version\":\"1.0\",\"accept\":\(n)}".utf8)
             }
             srv.onAccepted = { [weak self] count, ip in
-                let tag = listenPort == self?.usbPort ? "USB" : "LAN"
-                self?.notify("有连接 #\(count) \(tag) from \(ip)")
+                guard let self else { return }
+                let tag = listenPort == self.usbPort ? "USB" : "LAN"
+                let line = "有连接 #\(count) \(tag) from \(ip)"
+                self.onStatus?(line)
+                self.appendConnLogThrottled(line, key: "\(tag)|\(ip)")
             }
             srv.onVideoConnect = { [weak self] session, query in
                 guard let self else { return }
@@ -327,6 +333,20 @@ final class BaseRuntime {
     private func notify(_ text: String) {
         AppRunLog.shared.append(text)
         onStatus?(text)
+    }
+
+    /// UI 每次刷新；日志同一 IP 至少间隔 connLogMinInterval，避免刷屏。
+    private func appendConnLogThrottled(_ line: String, key: String) {
+        let now = Date()
+        if let last = lastConnLogAt[key], now.timeIntervalSince(last) < connLogMinInterval {
+            return
+        }
+        lastConnLogAt[key] = now
+        if lastConnLogAt.count > 32 {
+            let cutoff = now.addingTimeInterval(-connLogMinInterval * 4)
+            lastConnLogAt = lastConnLogAt.filter { $0.value >= cutoff }
+        }
+        AppRunLog.shared.append(line)
     }
 
     private func infoJSON(listenPort: UInt16) -> Data {
