@@ -38,65 +38,77 @@ enum BaseChrome {
         return l
     }
 
-    static func applyFilled(_ button: UIButton, title: String, color: UIColor = accent, ink: UIColor = accentInk) {
-        var c = UIButton.Configuration.filled()
-        c.title = title
-        c.baseBackgroundColor = color
-        c.baseForegroundColor = ink
-        c.cornerStyle = .medium
-        c.contentInsets = NSDirectionalEdgeInsets(top: 14, leading: 18, bottom: 14, trailing: 18)
-        c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
-            var out = incoming
-            out.font = .systemFont(ofSize: 17, weight: .semibold)
-            return out
+    // iOS 14: classic title/background/inset (no iOS15 button config API).
+    private static func styleButton(
+        _ button: UIButton,
+        title: String,
+        titleColor: UIColor,
+        background: UIColor?,
+        font: UIFont,
+        insets: UIEdgeInsets,
+        border: Bool = false
+    ) {
+        button.setTitle(title, for: .normal)
+        button.setTitleColor(titleColor, for: .normal)
+        button.titleLabel?.font = font
+        button.backgroundColor = background
+        button.contentEdgeInsets = insets
+        button.layer.cornerRadius = 10
+        button.layer.cornerCurve = .continuous
+        button.clipsToBounds = true
+        if border {
+            button.layer.borderWidth = 1
+            button.layer.borderColor = hairline.cgColor
+        } else {
+            button.layer.borderWidth = 0
+            button.layer.borderColor = nil
         }
-        button.configuration = c
+    }
+
+    static func applyFilled(_ button: UIButton, title: String, color: UIColor = accent, ink: UIColor = accentInk) {
+        styleButton(
+            button,
+            title: title,
+            titleColor: ink,
+            background: color,
+            font: .systemFont(ofSize: 17, weight: .semibold),
+            insets: UIEdgeInsets(top: 14, left: 18, bottom: 14, right: 18)
+        )
     }
 
     static func applyBordered(_ button: UIButton, title: String) {
-        var c = UIButton.Configuration.bordered()
-        c.title = title
-        c.baseForegroundColor = textPrimary
-        c.baseBackgroundColor = surfaceRaised
-        c.background.strokeColor = hairline
-        c.background.strokeWidth = 1
-        c.cornerStyle = .medium
-        c.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 14, bottom: 12, trailing: 14)
-        c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
-            var out = incoming
-            out.font = .systemFont(ofSize: 15, weight: .semibold)
-            return out
-        }
-        button.configuration = c
+        styleButton(
+            button,
+            title: title,
+            titleColor: textPrimary,
+            background: surfaceRaised,
+            font: .systemFont(ofSize: 15, weight: .semibold),
+            insets: UIEdgeInsets(top: 12, left: 14, bottom: 12, right: 14),
+            border: true
+        )
     }
 
     /// Colored chip for the 2×2 action grid (white label on solid tint).
     static func applyAction(_ button: UIButton, title: String, color: UIColor) {
-        var c = UIButton.Configuration.filled()
-        c.title = title
-        c.baseBackgroundColor = color
-        c.baseForegroundColor = .white
-        c.cornerStyle = .medium
-        c.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 10, bottom: 12, trailing: 10)
-        c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
-            var out = incoming
-            out.font = .systemFont(ofSize: 15, weight: .semibold)
-            return out
-        }
-        button.configuration = c
+        styleButton(
+            button,
+            title: title,
+            titleColor: .white,
+            background: color,
+            font: .systemFont(ofSize: 15, weight: .semibold),
+            insets: UIEdgeInsets(top: 12, left: 10, bottom: 12, right: 10)
+        )
     }
 
     static func applyPlain(_ button: UIButton, title: String, color: UIColor = textSecondary) {
-        var c = UIButton.Configuration.plain()
-        c.title = title
-        c.baseForegroundColor = color
-        c.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 8, bottom: 10, trailing: 8)
-        c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
-            var out = incoming
-            out.font = .systemFont(ofSize: 15, weight: .medium)
-            return out
-        }
-        button.configuration = c
+        styleButton(
+            button,
+            title: title,
+            titleColor: color,
+            background: nil,
+            font: .systemFont(ofSize: 15, weight: .medium),
+            insets: UIEdgeInsets(top: 10, left: 8, bottom: 10, right: 8)
+        )
     }
 
     static func kvRow(title: String, value: String) -> UIStackView {

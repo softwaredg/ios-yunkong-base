@@ -22,4 +22,6 @@
 
 须 Mac / GitHub Actions + **TrollStore**。源码在 `PhoneBaseLocal/`。打包脚本仍产出 `IOSYunKongBase.app`。
 
+最低系统 **iOS 14.0**（含 14.3 越狱/巨魔）。
+
 **不要擅自打包**——等产品明确说「打包」再打。
