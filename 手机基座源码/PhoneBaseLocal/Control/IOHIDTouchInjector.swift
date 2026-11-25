@@ -12,20 +12,14 @@ final class IOHIDTouchInjector: TouchInjector {
     private var touching = false
     private var lastX: Double = 0.5
     private var lastY: Double = 0.5
-    /// 样板 pointerQueue：down/move/up 同一有序队列。旧实现 move 与 down 分路 async，
-    /// 快拖时 move 可能在 touching=true 前被 drain 丢掉 → 偶发拖不动。
-    private enum PtrEvt {
-        case down(Double, Double)
-        case move(Double, Double)
-        case up(Double, Double)
-        case cancel
-    }
-    private var evtQueue: [PtrEvt] = []
+    /// 样板 PBTouchInjector 用 pointerQueue 保路径；latest-wins 会丢中间点，快拖悬浮球直接跟丢
+    private var moveQueue: [(Double, Double)] = []
     private var moveDrainScheduled = false
-    private static let evtQueueCap = 128
-    /// 无 sleep 插值补点（限速追点会明显拖慢，用户反馈不如上一版）
-    private static let maxMoveStep = 0.01
-    private static let maxInterpSteps = 100
+    /// 单次 drain 最多吐出的点数，避免极端堆积把按键堵住
+    private static let moveQueueCap = 64
+    /// 归一化步进上限：约 1.2% 屏宽，大于此则插值补点
+    private static let maxMoveStep = 0.012
+    private static let maxInterpSteps = 48
     /// tipa fingerIdentifiers[0]
     private let fingerId: UInt32 = 2
     private let senderID: UInt64 = 0x8000_0008_1731_9371
@@ -108,100 +102,62 @@ final class IOHIDTouchInjector: TouchInjector {
         guard isAvailable else { return }
         let nx = min(max(x, 0), 1)
         let ny = min(max(y, 0), 1)
-        moveLock.lock()
-        switch action {
-        case "down":
-            evtQueue.append(.down(nx, ny))
-        case "move":
-            evtQueue.append(.move(nx, ny))
-        case "up":
-            evtQueue.append(.up(nx, ny))
-        case "cancel":
-            // 丢掉未发出的 move，保留 down/up；最后抬指（勿用 0,0 跳点）
-            evtQueue.removeAll { if case .move = $0 { return true }; return false }
-            evtQueue.append(.cancel)
-        default:
+        if action == "move" {
+            moveLock.lock()
+            moveQueue.append((nx, ny))
+            while moveQueue.count > Self.moveQueueCap {
+                moveQueue.removeFirst()
+            }
+            let schedule = !moveDrainScheduled
+            if schedule { moveDrainScheduled = true }
             moveLock.unlock()
+            if schedule {
+                queue.async { [weak self] in self?.drainMoveQueue() }
+            }
             return
         }
-        while evtQueue.count > Self.evtQueueCap {
-            // 优先丢最旧 move，尽量保住 down/up/cancel 次序
-            if let i = evtQueue.firstIndex(where: { if case .move = $0 { return true }; return false }) {
-                evtQueue.remove(at: i)
-            } else {
-                evtQueue.removeFirst()
+        if action == "cancel" {
+            // 丢掉 pending move，在最后接触点抬起（勿用 0,0 跳点）
+            moveLock.lock()
+            moveQueue.removeAll(keepingCapacity: true)
+            moveDrainScheduled = false
+            moveLock.unlock()
+            queue.async { [weak self] in
+                guard let self else { return }
+                self.pointerLocked(action: "cancel", x: self.lastX, y: self.lastY)
             }
+            return
         }
-        let schedule = !moveDrainScheduled
-        if schedule { moveDrainScheduled = true }
-        moveLock.unlock()
-        if schedule {
-            queue.async { [weak self] in self?.drainEvtQueue() }
+        queue.async { [weak self] in
+            guard let self else { return }
+            // down/up 前先吐出队列，避免轨迹丢尾
+            self.drainMoveQueue()
+            self.pointerLocked(action: action, x: nx, y: ny)
         }
     }
 
-    private func drainEvtQueue() {
+    private func drainMoveQueue() {
         while true {
             moveLock.lock()
-            if evtQueue.isEmpty {
+            let next: (Double, Double)?
+            if moveQueue.isEmpty {
                 moveDrainScheduled = false
                 moveLock.unlock()
                 return
             }
-            let next = evtQueue.removeFirst()
-            // 连续 move 收成最新点，再一次性插值，避免队列堆积又不引入 sleep 滞后
-            var moveTarget: (Double, Double)?
-            if case let .move(x, y) = next {
-                moveTarget = (x, y)
-                while let first = evtQueue.first, case let .move(nx, ny) = first {
-                    evtQueue.removeFirst()
-                    moveTarget = (nx, ny)
-                }
-            }
+            next = moveQueue.removeFirst()
             moveLock.unlock()
-            if let moveTarget {
-                pointerLocked(action: "move", x: moveTarget.0, y: moveTarget.1)
-                continue
+            if touching, let next {
+                pointerLocked(action: "move", x: next.0, y: next.1)
             }
-            switch next {
-            case let .down(x, y):
-                pointerLocked(action: "down", x: x, y: y)
-            case .move:
-                break
-            case let .up(x, y):
-                pointerLocked(action: "up", x: x, y: y)
-            case .cancel:
-                pointerLocked(action: "cancel", x: lastX, y: lastY)
-            }
-        }
-    }
-
-    /// 大位移无延迟插值：快于限速追点，细于单点跳变
-    private func injectMovedInterpolated(toX x: Double, toY y: Double) {
-        let x0 = lastX
-        let y0 = lastY
-        let dx = x - x0
-        let dy = y - y0
-        let dist = (dx * dx + dy * dy).squareRoot()
-        if dist < 1e-9 { return }
-        var steps = Int(ceil(dist / Self.maxMoveStep))
-        if steps < 1 { steps = 1 }
-        if steps > Self.maxInterpSteps { steps = Self.maxInterpSteps }
-        for i in 1...steps {
-            let t = Double(i) / Double(steps)
-            let nx = x0 + dx * t
-            let ny = y0 + dy * t
-            lastX = nx
-            lastY = ny
-            postHand(phase: .moved, x: nx, y: ny)
         }
     }
 
     func pressHome() {
         guard isAvailable else { return }
-        // 丢掉未发出的指针事件，避免 digitizer 队列拖住后续抬起
+        // 丢掉未发出的 move，避免 digitizer 队列拖住后续抬起
         moveLock.lock()
-        evtQueue.removeAll(keepingCapacity: true)
+        moveQueue.removeAll(keepingCapacity: true)
         moveDrainScheduled = false
         moveLock.unlock()
         keyQueue.async { [weak self] in self?.menuPulseFast() }
@@ -211,7 +167,7 @@ final class IOHIDTouchInjector: TouchInjector {
     func pressAppSwitcher() {
         guard isAvailable else { return }
         moveLock.lock()
-        evtQueue.removeAll(keepingCapacity: true)
+        moveQueue.removeAll(keepingCapacity: true)
         moveDrainScheduled = false
         moveLock.unlock()
         keyQueue.async { [weak self] in
@@ -318,6 +274,29 @@ final class IOHIDTouchInjector: TouchInjector {
 
     private enum Phase { case touched, moved, lifted }
 
+    /// 大位移插值补点：快拖时 HID 点距过大，第三方悬浮球会跟丢
+    private func injectMovedInterpolated(toX x: Double, toY y: Double) {
+        let x0 = lastX
+        let y0 = lastY
+        let dx = x - x0
+        let dy = y - y0
+        let dist = (dx * dx + dy * dy).squareRoot()
+        if dist < 1e-9 {
+            return
+        }
+        var steps = Int(ceil(dist / Self.maxMoveStep))
+        if steps < 1 { steps = 1 }
+        if steps > Self.maxInterpSteps { steps = Self.maxInterpSteps }
+        for i in 1...steps {
+            let t = Double(i) / Double(steps)
+            let nx = x0 + dx * t
+            let ny = y0 + dy * t
+            lastX = nx
+            lastY = ny
+            postHand(phase: .moved, x: nx, y: ny)
+        }
+    }
+
     private func pointerLocked(action: String, x: Double, y: Double) {
         switch action {
         case "down":
@@ -330,10 +309,6 @@ final class IOHIDTouchInjector: TouchInjector {
             injectMovedInterpolated(toX: x, toY: y)
         case "up", "cancel":
             guard touching else { return }
-            // 抬指前先插值到落点，避免快拖松手时大跳
-            if action == "up" {
-                injectMovedInterpolated(toX: x, toY: y)
-            }
             touching = false
             lastX = x
             lastY = y
