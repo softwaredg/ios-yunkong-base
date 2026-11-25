@@ -151,7 +151,9 @@ final class BaseRuntime {
         if memHardStreak >= 3 {
             notify("内存仍高 · 硬重启并由看门狗拉起 footprint=\(bytes)")
             MemoryGuard.shared.noteRestart(reason: "memory-guard-hard")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            // 先 spawn 短命 relauncher，再 exit；避免长驻看门狗已被 jetsam 带走
+            ProcessWatchdog.spawnDeferredRelaunch(delayMs: 1500)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 exit(0)
             }
             return
@@ -211,7 +213,8 @@ final class BaseRuntime {
             // hard=1 → exit，由 ProcessWatchdog 拉起（对齐崩溃路径）
             if query["hard"] == "1" || query["mode"] == "hard" {
                 MemoryGuard.shared.noteRestart(reason: "control-hard")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                ProcessWatchdog.spawnDeferredRelaunch(delayMs: 1200)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                     exit(0)
                 }
                 return jsonOK(["action": "restart", "mode": "hard"])
