@@ -270,7 +270,7 @@ final class RootViewController: UIViewController {
             ink: running ? .white : BaseChrome.accentInk
         )
         if statusDetail.text?.isEmpty != false {
-            statusDetail.text = running ? "电脑可连接本机投屏（Helper）" : "启动后由 Helper 提供投屏服务"
+            statusDetail.text = running ? "电脑可连接本机投屏" : "点「启动服务」后电脑可连接"
         }
     }
 

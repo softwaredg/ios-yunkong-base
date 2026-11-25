@@ -2,6 +2,7 @@ import UIKit
 
 final class RunLogViewController: UIViewController {
     private let textView = UITextView()
+    private var copyItem: UIBarButtonItem?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -27,9 +28,11 @@ final class RunLogViewController: UIViewController {
             target: self,
             action: #selector(close)
         )
+        let copy = UIBarButtonItem(title: "复制", style: .plain, target: self, action: #selector(copyLog))
+        copyItem = copy
         navigationItem.rightBarButtonItems = [
             UIBarButtonItem(title: "清空", style: .plain, target: self, action: #selector(clearLog)),
-            UIBarButtonItem(title: "复制", style: .plain, target: self, action: #selector(copyLog)),
+            copy,
         ]
 
         textView.translatesAutoresizingMaskIntoConstraints = false
@@ -64,7 +67,7 @@ final class RunLogViewController: UIViewController {
         let text = AppRunLog.shared.snapshot()
         textView.text = text.isEmpty ? "暂无日志" : text
         if !text.isEmpty {
-            let end = NSRange(location: max(0, textView.text.count - 1), length: 0)
+            let end = NSRange(location: max(0, (textView.text as NSString).length - 1), length: 0)
             textView.scrollRangeToVisible(end)
         }
     }
@@ -74,10 +77,31 @@ final class RunLogViewController: UIViewController {
     }
 
     @objc private func copyLog() {
-        UIPasteboard.general.string = AppRunLog.shared.snapshot()
-        navigationItem.prompt = "已复制"
+        let text = AppRunLog.shared.snapshot()
+        guard !text.isEmpty else {
+            flashCopyTitle("无内容")
+            return
+        }
+        // 同时写字符串与明文 UTI，避免部分 App 粘贴读不到
+        UIPasteboard.general.items = [[
+            "public.utf8-plain-text": text,
+            "public.plain-text": text,
+        ]]
+        UIPasteboard.general.string = text
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        flashCopyTitle("已复制")
+        // 再给一个明确提示（prompt 在部分导航样式下几乎看不见）
+        let tip = UIAlertController(title: nil, message: "已复制 \(text.count) 字到剪贴板", preferredStyle: .alert)
+        present(tip, animated: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak tip] in
+            tip?.dismiss(animated: true)
+        }
+    }
+
+    private func flashCopyTitle(_ title: String) {
+        copyItem?.title = title
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            self?.navigationItem.prompt = nil
+            self?.copyItem?.title = "复制"
         }
     }
 

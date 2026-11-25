@@ -152,9 +152,17 @@ enum HelperLauncher {
         let deadline = Date().addingTimeInterval(12)
         while Date() < deadline {
             if tipaHealthy(expectVersion: probeExpect) { return true }
+            // 进程已死则不必空等
+            if kill(pid, 0) != 0 {
+                AppRunLog.shared.append("Helper pid=\(pid) 已退出，健康检查中止")
+                return false
+            }
             usleep(400_000)
         }
-        AppRunLog.shared.append("Helper 已 spawn，但健康检查超时 expect=\(probeExpect.isEmpty ? "any" : probeExpect)")
+        let alive = kill(pid, 0) == 0
+        AppRunLog.shared.append(
+            "Helper 已 spawn，但健康检查超时 expect=\(probeExpect.isEmpty ? "any" : probeExpect) alive=\(alive ? 1 : 0)"
+        )
         return false
     }
 

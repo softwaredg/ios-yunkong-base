@@ -1,6 +1,7 @@
 import Foundation
+import UIKit
 
-/// 主 UI 侧服务门面：实际投屏在 Helper 进程，经本机 HTTP 启停/探活。
+/// 主 UI 侧服务门面：优先 Helper 进程；Helper 起不来时回退到主进程 BaseRuntime。
 final class ServiceGateway {
     static let shared = ServiceGateway()
 
@@ -8,6 +9,8 @@ final class ServiceGateway {
     var onStatus: ((String) -> Void)?
 
     private var cachedRunning = false
+    /// 当前由主进程 BaseRuntime 提供服务（Helper 不可用时的回退）
+    private var usingInProcess = false
     /// 用户点过停止后，启动自动 ensure 不再强行拉起，直到再次点启动
     private var userStopped = false
     private let lock = NSLock()
@@ -26,13 +29,15 @@ final class ServiceGateway {
                 DispatchQueue.main.async { completion?() }
                 return
             }
-            let ok = HelperLauncher.tipaHealthy(expectVersion: "")
+            let helperOk = HelperLauncher.tipaHealthy(expectVersion: "")
+            let localOk = BaseRuntime.shared.isRunning
             self.lock.lock()
-            // 用户点过停止：即使 Helper 尚未杀掉，也不要把停止意图清掉、也不显示运行中
             if self.userStopped {
                 self.cachedRunning = false
             } else {
-                self.cachedRunning = ok
+                self.cachedRunning = helperOk || localOk
+                if helperOk { self.usingInProcess = false }
+                else if localOk { self.usingInProcess = true }
             }
             self.lock.unlock()
             DispatchQueue.main.async { completion?() }
@@ -44,7 +49,7 @@ final class ServiceGateway {
         }
     }
 
-    /// 冷启动：若用户未主动停止，则拉起 Helper。
+    /// 冷启动：若用户未主动停止，则拉起服务。
     func startIfNeededOnLaunch() {
         lock.lock()
         let stopped = userStopped
@@ -59,9 +64,8 @@ final class ServiceGateway {
         userStopped = false
         lock.unlock()
         DispatchQueue.main.async { [weak self] in
-            self?.onStatus?("正在拉起 Helper 服务…")
+            self?.onStatus?("正在启动服务…")
         }
-        // 禁止在主线程 posix_spawn / 信号量干等，避免卡死 UI
         if Thread.isMainThread {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 _ = self?.startBlocking()
@@ -73,31 +77,61 @@ final class ServiceGateway {
 
     @discardableResult
     private func startBlocking() -> Bool {
-        let ok = HelperLauncher.ensureRunning()
+        let helperOk = HelperLauncher.ensureRunning()
         let expect = TipaSelfUpdate.localVersion
-        let deadline = Date().addingTimeInterval(10)
+        let deadline = Date().addingTimeInterval(8)
         var healthy = HelperLauncher.tipaHealthy(expectVersion: expect)
         while !healthy && Date() < deadline {
             usleep(400_000)
             healthy = HelperLauncher.tipaHealthy(expectVersion: expect)
+            if !healthy {
+                // 版本戳异常时，至少确认有 lan-phonebase 在听
+                healthy = HelperLauncher.tipaHealthy(expectVersion: "")
+                    && HelperLauncher.isHelperAlive()
+            }
         }
-        lock.lock()
-        cachedRunning = healthy
-        lock.unlock()
-        let status: String
+
         if healthy {
-            status = "服务已启动（Helper）· 本机:\(port)"
+            lock.lock()
+            cachedRunning = true
+            usingInProcess = false
+            lock.unlock()
+            let status = "服务已启动（Helper）· 本机:\(port)"
             AppRunLog.shared.append("用户启动服务 → Helper 就绪")
-        } else if ok {
-            status = "Helper 已拉起，服务就绪中…"
-            AppRunLog.shared.append("Helper 已 spawn，健康检查仍等待")
+            DispatchQueue.main.async { [weak self] in self?.onStatus?(status) }
+            return true
+        }
+
+        AppRunLog.shared.append(
+            "Helper 未就绪（spawn=\(helperOk ? "ok" : "fail") alive=\(HelperLauncher.isHelperAlive() ? 1 : 0)），回退主进程开服"
+        )
+        // Helper 起不来：主进程直接开 BaseRuntime，保证 PC 能连
+        let localOk: Bool = {
+            if Thread.isMainThread {
+                return BaseRuntime.shared.start(notifyStatus: true)
+            }
+            var result = false
+            DispatchQueue.main.sync {
+                result = BaseRuntime.shared.start(notifyStatus: true)
+            }
+            return result
+        }()
+
+        lock.lock()
+        cachedRunning = localOk
+        usingInProcess = localOk
+        lock.unlock()
+
+        let status: String
+        if localOk {
+            status = "服务已启动（主进程回退）· 本机:\(port)"
+            AppRunLog.shared.append("主进程 BaseRuntime 已启动（Helper 回退）")
         } else {
-            status = "启动失败：无法拉起 PhoneBaseHelper"
+            status = "启动失败：Helper 与主进程均未能监听 \(port)"
+            AppRunLog.shared.append("启动失败：Helper/主进程都未就绪")
         }
-        DispatchQueue.main.async { [weak self] in
-            self?.onStatus?(status)
-        }
-        return healthy || ok
+        DispatchQueue.main.async { [weak self] in self?.onStatus?(status) }
+        return localOk
     }
 
     func stop() {
@@ -105,22 +139,29 @@ final class ServiceGateway {
         lock.lock()
         userStopped = true
         cachedRunning = false
+        let local = usingInProcess
+        usingInProcess = false
         lock.unlock()
         DispatchQueue.main.async { [weak self] in
-            self?.onStatus?("正在停止 Helper…")
+            self?.onStatus?("正在停止服务…")
         }
-        if Thread.isMainThread {
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                HelperLauncher.terminateHelper()
-                DispatchQueue.main.async {
-                    self?.onStatus?("服务已停止")
+        let work = {
+            HelperLauncher.terminateHelper()
+            if local || BaseRuntime.shared.isRunning {
+                if Thread.isMainThread {
+                    BaseRuntime.shared.stop()
+                } else {
+                    DispatchQueue.main.sync { BaseRuntime.shared.stop() }
                 }
             }
-        } else {
-            HelperLauncher.terminateHelper()
             DispatchQueue.main.async { [weak self] in
                 self?.onStatus?("服务已停止")
             }
+        }
+        if Thread.isMainThread {
+            DispatchQueue.global(qos: .userInitiated).async(execute: work)
+        } else {
+            work()
         }
     }
 }
