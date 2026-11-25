@@ -141,6 +141,8 @@ final class ControlHub {
             let action = obj["action"] as? String ?? ""
             let seq = intVal(obj["seq"]) ?? 0
             if action == "cancel" {
+                // 必须抬指：样板 cancelGesture；旧逻辑只 ack 会幽灵按住 / 悬浮球拖丢
+                injector.pointer(action: "cancel", x: 0, y: 0)
                 ack(session, seq: seq, ok: true)
                 return
             }

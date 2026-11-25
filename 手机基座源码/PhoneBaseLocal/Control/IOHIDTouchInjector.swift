@@ -108,6 +108,18 @@ final class IOHIDTouchInjector: TouchInjector {
             }
             return
         }
+        if action == "cancel" {
+            // 丢掉 pending move，在最后接触点抬起（勿用 0,0 跳点）
+            moveLock.lock()
+            coalescedMove = nil
+            moveDrainScheduled = false
+            moveLock.unlock()
+            queue.async { [weak self] in
+                guard let self else { return }
+                self.pointerLocked(action: "cancel", x: self.lastX, y: self.lastY)
+            }
+            return
+        }
         queue.async { [weak self] in
             guard let self else { return }
             // down/up 前先吐出最后一次 move，避免轨迹丢尾
