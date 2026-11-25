@@ -189,19 +189,23 @@ final class ControlHub {
                 ack(session, seq: seq, ok: false, error: "bad url")
                 return
             }
-            DispatchQueue.main.async { [weak self, weak session] in
-                guard let self, let session else { return }
-                // PC 推更新：武装 Helper 装后拉起
-                if (url.scheme ?? "").lowercased() == "apple-magnifier" {
-                    HelperLauncher.armPostUpdate(expectVersion: "")
+            let needArm = (url.scheme ?? "").lowercased() == "apple-magnifier"
+            let parsedVer = TipaSelfUpdate.versionFromInstallURL(url) ?? ""
+            DispatchQueue.global(qos: .userInitiated).async {
+                if needArm {
+                    // 优先用 tipa URL 里的版本；解析不到则 pending，避免写成 local 导致装前被清标记
+                    HelperLauncher.armPostUpdate(expectVersion: parsedVer)
                 }
-                UIApplication.shared.open(url, options: [:]) { ok in
-                    if ok {
-                        AppRunLog.shared.append("控制通道打开巨魔 scheme=\(url.scheme ?? "?")")
-                        self.ack(session, seq: seq, ok: true)
-                    } else {
-                        AppRunLog.shared.append("控制通道打开失败 scheme=\(url.scheme ?? "?")")
-                        self.ack(session, seq: seq, ok: false, error: "open failed")
+                DispatchQueue.main.async { [weak self, weak session] in
+                    guard let self, let session else { return }
+                    UIApplication.shared.open(url, options: [:]) { ok in
+                        if ok {
+                            AppRunLog.shared.append("控制通道打开巨魔 scheme=\(url.scheme ?? "?")")
+                            self.ack(session, seq: seq, ok: true)
+                        } else {
+                            AppRunLog.shared.append("控制通道打开失败 scheme=\(url.scheme ?? "?")")
+                            self.ack(session, seq: seq, ok: false, error: "open failed")
+                        }
                     }
                 }
             }

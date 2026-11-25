@@ -4,6 +4,7 @@ import Darwin
 /// 主 App 拉起 / 停止包内独立 `PhoneBaseHelper`。
 enum HelperLauncher {
     private static let helperName = ProcessRole.helperExecutableName
+    private static let gate = NSLock()
 
     static var helperPath: String? {
         Bundle.main.bundlePath + "/" + helperName
@@ -19,44 +20,66 @@ enum HelperLauncher {
         name.lowercased().hasPrefix("phonebasehelper")
     }
 
-    /// 确保 Helper 在跑；已在跑则只武装 post-update 环境（通过标记文件）。
+    /// 主 UI 进程是否在跑（装后 Supervisor 用它判断拉起是否成功）。
+    static func isMainAppAlive() -> Bool {
+        let selfPid = getpid()
+        return PortOccupancy.listProcessNames().contains { p in
+            guard p.pid != selfPid, p.pid > 1 else { return false }
+            let n = p.name.lowercased()
+            return n.hasPrefix("iosyunkong") || n.hasPrefix("phonebaselocal")
+        }
+    }
+
+    /// 确保 Helper 在跑且版本 ≥ 本机；已满足则直接返回。
+    /// - Note: 装 tipa 后旧 Helper 仍占口时，必须按版本踢掉再 spawn，否则会一直跑旧二进制。
     @discardableResult
     static func ensureRunning(postUpdate: Bool = false, expectVersion: String = "") -> Bool {
+        gate.lock()
+        defer { gate.unlock() }
+        let expect = expectVersion.isEmpty ? TipaSelfUpdate.localVersion : expectVersion
         if postUpdate {
-            UpdateMarker.write(expectVersion: expectVersion)
+            UpdateMarker.write(expectVersion: expect, baselineLocal: TipaSelfUpdate.localVersion)
         }
-        if tipaHealthy(expectVersion: "") {
-            NSLog("[HelperLauncher] service already healthy")
+        // pending 只表示「装后拉起」，探活不按版本卡死
+        let healthyExpect = (expect == "pending") ? "" : expect
+        if tipaHealthy(expectVersion: healthyExpect) {
+            NSLog("[HelperLauncher] service already healthy expect=%@", expect)
             return true
         }
         // 先清旧 helper，再拉新的
+        // 注意：不要因残留 UpdateMarker 就带 postUpdate 环境，否则取消安装后普通退出也会被拉回前台
         terminateHelpers(except: getpid())
         return spawnHelper(
-            postUpdate: postUpdate || UpdateMarker.exists,
-            expectVersion: expectVersion,
+            postUpdate: postUpdate,
+            expectVersion: expect,
             waitHealthy: true
         )
     }
 
     static func armPostUpdate(expectVersion: String) {
-        UpdateMarker.write(expectVersion: expectVersion)
-        // 服务已在跑时只写标记；HelperSupervisor 见标记会拉主 App
+        // expect 必须是目标新版本；空则用 pending 哨兵，避免写成 local 导致装前就被 resume 清掉
+        let expect = expectVersion.isEmpty ? "pending" : expectVersion
+        UpdateMarker.write(expectVersion: expect, baselineLocal: TipaSelfUpdate.localVersion)
+        // 装前必须保留现有 Helper（装后靠它拉主 App）；只写标记，不因版本杀掉
         if tipaHealthy(expectVersion: "") {
-            AppRunLog.shared.append("已武装装后拉起（服务仍在）expect=\(expectVersion)")
+            AppRunLog.shared.append("已武装装后拉起（服务仍在）expect=\(expect)")
             return
         }
-        _ = ensureRunning(postUpdate: true, expectVersion: expectVersion)
-        AppRunLog.shared.append("已武装 Helper 装后拉起 expect=\(expectVersion)")
+        _ = ensureRunning(postUpdate: true, expectVersion: expect)
+        AppRunLog.shared.append("已武装 Helper 装后拉起 expect=\(expect)")
     }
 
-    /// Helper 硬退出前：立刻再 spawn 一份自己（不因 healthy 短路、不等待端口）。
+    /// Helper 硬退出前：立刻再 spawn 替身（不写装后标记、不拉主 UI）。
     @discardableResult
-    static func spawnReplacementHelper(expectVersion: String = "") -> Bool {
-        UpdateMarker.write(expectVersion: expectVersion.isEmpty ? TipaSelfUpdate.localVersion : expectVersion)
-        return spawnHelper(postUpdate: true, expectVersion: expectVersion, waitHealthy: false)
+    static func spawnReplacementHelper() -> Bool {
+        gate.lock()
+        defer { gate.unlock() }
+        return spawnHelper(postUpdate: false, expectVersion: "", waitHealthy: false)
     }
 
     static func terminateHelper() {
+        gate.lock()
+        defer { gate.unlock() }
         // 先礼貌停服
         _ = httpControlStop()
         usleep(200_000)
@@ -120,13 +143,19 @@ enum HelperLauncher {
         }
         NSLog("[HelperLauncher] spawned helper pid=%d", pid)
         guard waitHealthy else { return true }
+        // 版本替换场景必须按 expect 探活，避免旧 Helper 仍占口被当成成功
+        let probeExpect: String = {
+            if expectVersion == "pending" { return "" }
+            if expectVersion.isEmpty { return TipaSelfUpdate.localVersion }
+            return expectVersion
+        }()
         let deadline = Date().addingTimeInterval(12)
         while Date() < deadline {
-            if tipaHealthy(expectVersion: "") { return true }
+            if tipaHealthy(expectVersion: probeExpect) { return true }
             usleep(400_000)
         }
-        AppRunLog.shared.append("Helper 已 spawn，等待服务就绪…")
-        return true
+        AppRunLog.shared.append("Helper 已 spawn，但健康检查超时 expect=\(probeExpect.isEmpty ? "any" : probeExpect)")
+        return false
     }
 
     private static func httpControlStop() -> Bool {
@@ -160,17 +189,15 @@ enum HelperLauncher {
             // 避免把 Direct 等其它占口进程当成我们的 Helper
             let proto = (obj["protocol"] as? String) ?? ""
             if proto != "lan-phonebase" { return }
-            if expectVersion.isEmpty {
+            if expectVersion.isEmpty || expectVersion == "pending" {
                 healthy = true
                 return
             }
             let release = obj["release"] as? [String: Any]
             let ver = (release?["version"] as? String) ?? ""
-            if ver.isEmpty {
-                healthy = true
-            } else {
-                healthy = TipaSelfUpdate.cmpVer(ver, expectVersion) >= 0
-            }
+            // 有明确期望版本时，缺版本字段不能算通过（否则旧/外来进程会挡住替换）
+            guard !ver.isEmpty else { return }
+            healthy = TipaSelfUpdate.cmpVer(ver, expectVersion) >= 0
         }.resume()
         _ = sem.wait(timeout: .now() + 1.8)
         return healthy

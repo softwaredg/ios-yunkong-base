@@ -116,29 +116,61 @@ enum TipaSelfUpdate {
         task.resume()
     }
 
-    /// 启动时：若有装后标记，清掉并记日志（Helper 负责拉起；此处确认版本）。
+    /// 启动时：确认装后版本；仅在本机已相对装前 baseline 升高且达到 expect 时清标记。
     static func resumeInstalledUpdateIfNeeded() {
         guard UpdateMarker.exists else { return }
-        let expect = UpdateMarker.readVersion() ?? "?"
+        let expect = UpdateMarker.readVersion() ?? ""
+        let baseline = UpdateMarker.readBaseline() ?? ""
         let local = localVersion
-        if cmpVer(local, expect) >= 0 {
-            AppRunLog.shared.append("装后续上完成 local=\(local) expect=\(expect)")
+        let upgraded = baseline.isEmpty || cmpVer(local, baseline) > 0
+        let expectMet: Bool = {
+            if expect.isEmpty || expect == "pending" { return upgraded }
+            return cmpVer(local, expect) >= 0
+        }()
+        if upgraded && expectMet {
+            AppRunLog.shared.append("装后续上完成 local=\(local) expect=\(expect) baseline=\(baseline)")
             UpdateMarker.clear()
         } else {
-            AppRunLog.shared.append("装后续上：本机 \(local) 仍低于 \(expect)，保留标记")
+            AppRunLog.shared.append("装后续上：local=\(local) expect=\(expect) baseline=\(baseline)，保留标记")
         }
+    }
+
+    /// 从 apple-magnifier://install?url=… 或 tipa HTTPS URL 解析版本号。
+    static func versionFromInstallURL(_ url: URL) -> String? {
+        var tipaURL = url
+        if (url.scheme ?? "").lowercased() == "apple-magnifier" {
+            guard let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+                  let raw = items.first(where: { $0.name.lowercased() == "url" })?.value,
+                  let nested = URL(string: raw)
+            else { return nil }
+            tipaURL = nested
+        }
+        let name = tipaURL.lastPathComponent
+        // IOS投屏-0.2.61.tipa / PhoneBase_0.2.61.tipa / …-0.2.61.ipa
+        let pattern = #"(\d+\.\d+(?:\.\d+)?)"#
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(name.startIndex..<name.endIndex, in: name)
+        guard let match = re.firstMatch(in: name, range: range),
+              let r = Range(match.range(at: 1), in: name)
+        else { return nil }
+        return String(name[r])
     }
 
     /// 兼容旧调用：直接 magnifier（无下载）。
     @discardableResult
     static func openInstall(manifest: Manifest, completion: ((Bool) -> Void)? = nil) -> Bool {
-        HelperLauncher.armPostUpdate(expectVersion: manifest.version)
         guard let u = trollInstallURL(tipaHttpsURL: manifest.url) else {
             completion?(false)
             return false
         }
-        UIApplication.shared.open(u, options: [:]) { ok in
-            DispatchQueue.main.async { completion?(ok) }
+        let ver = manifest.version
+        DispatchQueue.global(qos: .userInitiated).async {
+            HelperLauncher.armPostUpdate(expectVersion: ver)
+            DispatchQueue.main.async {
+                UIApplication.shared.open(u, options: [:]) { ok in
+                    completion?(ok)
+                }
+            }
         }
         return true
     }

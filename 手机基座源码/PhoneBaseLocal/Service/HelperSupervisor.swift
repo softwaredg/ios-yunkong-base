@@ -10,6 +10,8 @@ final class HelperSupervisor {
     private let updateInitialDelayUs: useconds_t = 20_000_000
     private let retryUs: useconds_t = 3_000_000
     private let windowSec: TimeInterval = 180
+    /// 装后拉起最多 3 个窗口（约 3×(20s+3min)），避免失败后永久空转
+    private let maxPullWindows = 3
 
     func start() {
         guard ProcessRole.isHelper else { return }
@@ -23,24 +25,48 @@ final class HelperSupervisor {
 
     private func runLoop() {
         let parent = ProcessRole.parentPid
-        var armed = ProcessRole.postUpdateArmed
+        var armed = false
+        var pullWindows = 0
         NSLog(
-            "[HelperSupervisor] watch parent=%d armed=%d expect=%@",
-            parent, armed ? 1 : 0, ProcessRole.expectVersion
+            "[HelperSupervisor] watch parent=%d marker=%d expect=%@",
+            parent, UpdateMarker.exists ? 1 : 0, ProcessRole.expectVersion
         )
         while true {
-            if !armed && UpdateMarker.exists {
+            // 只认标记文件：用户点「稍后」清标记后必须解除武装，避免普通退出被拉回
+            let shouldArm = UpdateMarker.exists
+            if shouldArm && !armed {
                 armed = true
+                pullWindows = 0
                 NSLog("[HelperSupervisor] marker → post-update")
+            } else if !shouldArm && armed {
+                armed = false
+                pullWindows = 0
+                NSLog("[HelperSupervisor] marker cleared → disarm")
             }
             let parentGone = parent > 1 && kill(parent, 0) != 0
             if armed && (parentGone || parent <= 1) {
                 let expect = ProcessRole.expectVersion
-                NSLog("[HelperSupervisor] pull main expect=%@", expect)
+                pullWindows += 1
+                NSLog("[HelperSupervisor] pull main window=%d expect=%@", pullWindows, expect)
                 usleep(updateInitialDelayUs)
-                _ = pullMainUntilReady(expectVersion: expect)
-                UpdateMarker.clear()
-                armed = false
+                // 等待期间用户可能取消：再确认一次标记
+                guard UpdateMarker.exists else {
+                    armed = false
+                    pullWindows = 0
+                    continue
+                }
+                let ok = pullMainUntilReady(expectVersion: expect)
+                if ok || pullWindows >= maxPullWindows {
+                    UpdateMarker.clear()
+                    armed = false
+                    NSLog(
+                        "[HelperSupervisor] done ok=%d windows=%d",
+                        ok ? 1 : 0, pullWindows
+                    )
+                } else {
+                    NSLog("[HelperSupervisor] window failed, will retry")
+                    usleep(retryUs)
+                }
             }
             // 主 UI 普通退出：Helper 继续跑服务，不强行把 UI 拉回前台
             usleep(500_000)
@@ -54,18 +80,23 @@ final class HelperSupervisor {
         while Date() < deadline {
             n += 1
             fireLaunchMain()
-            // 服务应已在本 helper；再确认主 App 被打开后版本标记可清
-            if HelperLauncher.tipaHealthy(expectVersion: expectVersion) {
-                // 再 open 一次确保 UI 到前台
+            // 装后本 Helper 仍是旧二进制，/api/info 版本会对不上 expect；
+            // 以主 UI 进程存活为准，再补一次 open 把界面拉到前台。
+            if HelperLauncher.isMainAppAlive() {
+                usleep(800_000)
                 fireLaunchMain()
-                NSLog("[HelperSupervisor] healthy after %d", n)
+                NSLog("[HelperSupervisor] main alive after %d expect=%@", n, expectVersion)
                 return true
+            }
+            // 兜底：无版本要求的健康探活（主进程名枚举失败时）
+            if n >= 2, HelperLauncher.tipaHealthy(expectVersion: "") {
+                fireLaunchMain()
             }
             NSLog("[HelperSupervisor] attempt %d", n)
             usleep(retryUs)
         }
         fireLaunchMain()
-        return false
+        return HelperLauncher.isMainAppAlive()
     }
 
     private func fireLaunchMain() {

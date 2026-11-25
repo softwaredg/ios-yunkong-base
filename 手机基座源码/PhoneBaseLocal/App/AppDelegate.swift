@@ -18,7 +18,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         LocalNetworkPermission.shared.requestIfNeeded()
         BackgroundKeepAlive.shared.start()
 
-        // 主 UI 不绑 11019；拉起独立 Helper 跑投屏服务
+        // 主 UI 不绑 11019；按本机版本拉起/替换 Helper（装后会踢掉旧二进制）
         DispatchQueue.global(qos: .userInitiated).async {
             ServiceGateway.shared.startIfNeededOnLaunch()
             DispatchQueue.main.async {
@@ -45,8 +45,10 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     ) -> Bool {
         guard url.scheme?.lowercased() == "phonebase" else { return false }
         BackgroundKeepAlive.shared.start()
-        _ = HelperLauncher.ensureRunning()
-        ServiceGateway.shared.refreshStatus()
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = HelperLauncher.ensureRunning()
+            ServiceGateway.shared.refreshStatus()
+        }
         return true
     }
 }

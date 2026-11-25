@@ -92,8 +92,17 @@ final class TipaInstallGuideViewController: UIViewController {
     @objc private func startInstall() {
         openButton.isEnabled = false
         statusLabel.text = "正在武装 Helper 并下载 \(manifest.version)…"
-        HelperLauncher.armPostUpdate(expectVersion: manifest.version)
+        let version = manifest.version
+        // arm / spawn 可能干等数秒，必须离开主线程
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            HelperLauncher.armPostUpdate(expectVersion: version)
+            DispatchQueue.main.async {
+                self?.beginDownload()
+            }
+        }
+    }
 
+    private func beginDownload() {
         TipaSelfUpdate.downloadTipa(manifest: manifest) { [weak self] result in
             guard let self else { return }
             switch result {
@@ -142,6 +151,8 @@ final class TipaInstallGuideViewController: UIViewController {
     }
 
     @objc private func close() {
+        // 用户放弃安装：清掉装后标记，避免之后普通退出被 Helper 强行拉回
+        UpdateMarker.clear()
         dismiss(animated: true)
     }
 }

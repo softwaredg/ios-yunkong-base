@@ -8,12 +8,30 @@ enum UpdateMarker {
         return base.appendingPathComponent("phonebase-post-update.flag")
     }
 
+    /// 超过此时长未完成的装后标记视为过期（取消安装 / 中途放弃）。
+    private static let maxAgeSec: TimeInterval = 6 * 3600
+
     static var exists: Bool {
-        FileManager.default.fileExists(atPath: url.path)
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        if isExpired {
+            clear()
+            return false
+        }
+        return true
     }
 
-    static func write(expectVersion: String) {
-        let body = "\(expectVersion)\n\(Date().timeIntervalSince1970)\n"
+    static var isExpired: Bool {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return true }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count >= 2, let ts = TimeInterval(lines[1].trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return false
+        }
+        return Date().timeIntervalSince1970 - ts > maxAgeSec
+    }
+
+    /// line0=expectVersion  line1=timestamp  line2=baselineLocal（装前本机版本）
+    static func write(expectVersion: String, baselineLocal: String = TipaSelfUpdate.localVersion) {
+        let body = "\(expectVersion)\n\(Date().timeIntervalSince1970)\n\(baselineLocal)\n"
         try? body.write(to: url, atomically: true, encoding: .utf8)
     }
 
@@ -22,6 +40,14 @@ enum UpdateMarker {
         let v = text.split(separator: "\n").first.map(String.init)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return (v?.isEmpty == false) ? v : nil
+    }
+
+    static func readBaseline() -> String? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count >= 3 else { return nil }
+        let b = String(lines[2]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return b.isEmpty ? nil : b
     }
 
     static func clear() {

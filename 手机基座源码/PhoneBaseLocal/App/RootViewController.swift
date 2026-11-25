@@ -100,9 +100,10 @@ final class RootViewController: UIViewController {
         )
 
         statusPoll = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
-            self?.gateway.refreshStatus()
-            self?.refreshHero()
-            self?.refreshDeviceInfo(light: true)
+            self?.gateway.refreshStatus { [weak self] in
+                self?.refreshHero()
+                self?.refreshDeviceInfo(light: true)
+            }
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
@@ -236,14 +237,17 @@ final class RootViewController: UIViewController {
                 self?.refreshDeviceInfo(light: true)
             }
         }
-        gateway.refreshStatus()
+        gateway.refreshStatus { [weak self] in
+            self?.refreshHero()
+        }
     }
 
     @objc private func onAppActive() {
-        gateway.refreshStatus()
         refreshIP()
-        refreshDeviceInfo()
-        refreshHero()
+        gateway.refreshStatus { [weak self] in
+            self?.refreshDeviceInfo()
+            self?.refreshHero()
+        }
     }
 
     @objc private func openRunLog() {
@@ -361,21 +365,30 @@ final class RootViewController: UIViewController {
     @objc private func toggle() {
         if gateway.isRunning {
             gateway.stop()
+            refreshIP()
+            refreshDeviceInfo()
+            refreshHero()
         } else {
+            statusDetail.text = "正在拉起 Helper…"
             _ = gateway.start()
+            // start 在后台完成；短延时刷新按钮态
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                self?.refreshIP()
+                self?.gateway.refreshStatus {
+                    self?.refreshDeviceInfo()
+                    self?.refreshHero()
+                }
+            }
         }
-        refreshIP()
-        refreshDeviceInfo()
-        refreshHero()
     }
 
     private func runSelfTest(silent: Bool) {
         selfTestButton.isEnabled = false
         let port = gateway.port
         let lan = LanAddress.ipv4List().first
-        gateway.refreshStatus()
-        let oursRunning = gateway.isRunning
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.gateway.refreshStatus()
+            let oursRunning = self?.gateway.isRunning ?? false
             let local = Self.fetchSummary("http://127.0.0.1:\(port)/api/health")
             let lanResult: String
             if let lan {
@@ -394,8 +407,9 @@ final class RootViewController: UIViewController {
                         : "自检发现问题，详情见运行日志"
                 }
                 self?.selfTestButton.isEnabled = true
-                self?.gateway.refreshStatus()
-                self?.refreshHero()
+                self?.gateway.refreshStatus {
+                    self?.refreshHero()
+                }
             }
         }
     }

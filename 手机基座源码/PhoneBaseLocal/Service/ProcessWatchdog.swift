@@ -10,16 +10,15 @@ enum ProcessWatchdog {
         HelperLauncher.armPostUpdate(expectVersion: expectVersion)
     }
 
-    /// BaseRuntime 硬退出前调用。
+    /// BaseRuntime 硬退出前调用（内存守卫 / control hard）。
+    /// Helper 只拉替身续服；不写装后标记，避免误把主 UI 拉回前台。
     static func spawnDeferredRelaunch(delayMs: UInt32 = 1500) {
-        let expect = TipaSelfUpdate.localVersion
-        UpdateMarker.write(expectVersion: expect)
         if ProcessRole.isHelper {
-            // 当前 helper 即将 exit：先拉替身，再留给系统回收本进程
-            _ = HelperLauncher.spawnReplacementHelper(expectVersion: expect)
+            _ = HelperLauncher.spawnReplacementHelper()
             if delayMs > 0 { usleep(delayMs * 1000) }
         } else {
-            HelperLauncher.armPostUpdate(expectVersion: expect)
+            // 主 UI 进程不应再跑 BaseRuntime；兜底仍拉 Helper 续服
+            _ = HelperLauncher.ensureRunning()
         }
     }
 }
