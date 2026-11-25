@@ -1,6 +1,25 @@
 import Foundation
 import Darwin
 
+// 与样板 / TrollStore spawnRoot 一致：persona 99 + uid/gid 0，装 tipa 时不被 BKSTerminate 一并带走
+private let POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE: UInt32 = 1
+@_silgen_name("posix_spawnattr_set_persona_np")
+private func posix_spawnattr_set_persona_np(
+    _ attr: UnsafeMutablePointer<posix_spawnattr_t?>,
+    _ personaId: uid_t,
+    _ flags: UInt32
+) -> Int32
+@_silgen_name("posix_spawnattr_set_persona_uid_np")
+private func posix_spawnattr_set_persona_uid_np(
+    _ attr: UnsafeMutablePointer<posix_spawnattr_t?>,
+    _ uid: uid_t
+) -> Int32
+@_silgen_name("posix_spawnattr_set_persona_gid_np")
+private func posix_spawnattr_set_persona_gid_np(
+    _ attr: UnsafeMutablePointer<posix_spawnattr_t?>,
+    _ gid: gid_t
+) -> Int32
+
 /// 主 App 拉起 / 停止包内独立 `PhoneBaseHelper`。
 enum HelperLauncher {
     private static let helperName = ProcessRole.helperExecutableName
@@ -156,9 +175,18 @@ enum HelperLauncher {
 
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
+        defer { posix_spawnattr_destroy(&attr) }
+        // 样板同款：persona-mgmt 拉 root Helper，覆盖安装杀主 App 时 Helper 仍可 openApplication
+        let personaRc = posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE)
+        let uidRc = posix_spawnattr_set_persona_uid_np(&attr, 0)
+        let gidRc = posix_spawnattr_set_persona_gid_np(&attr, 0)
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
         posix_spawnattr_setpgroup(&attr, 0)
-        defer { posix_spawnattr_destroy(&attr) }
+        if personaRc != 0 || uidRc != 0 || gidRc != 0 {
+            AppRunLog.shared.append(
+                "Helper persona 设置异常 persona=\(personaRc) uid=\(uidRc) gid=\(gidRc)，仍尝试 spawn"
+            )
+        }
 
         let rc = argv.withUnsafeMutableBufferPointer { argBuf in
             envp.withUnsafeMutableBufferPointer { envBuf in
@@ -170,7 +198,10 @@ enum HelperLauncher {
             AppRunLog.shared.append("拉起 Helper 失败 rc=\(rc)")
             return false
         }
-        NSLog("[HelperLauncher] spawned helper pid=%d", pid)
+        NSLog("[HelperLauncher] spawned helper pid=%d persona=99", pid)
+        if postUpdate {
+            AppRunLog.shared.append("已 spawn Helper pid=\(pid) persona=99（装后保活）")
+        }
         guard waitHealthy else { return true }
         // 装前武装（postUpdate）：只要协议通；装后 ensure 才按目标版本探活
         let probeExpect: String = {

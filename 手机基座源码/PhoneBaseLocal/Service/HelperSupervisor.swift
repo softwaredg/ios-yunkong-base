@@ -49,6 +49,7 @@ final class HelperSupervisor {
                 let expect = ProcessRole.expectVersion
                 pullWindows += 1
                 NSLog("[HelperSupervisor] pull main window=%d expect=%@", pullWindows, expect)
+                AppRunLog.shared.append("Supervisor 装后拉起 window=\(pullWindows) expect=\(expect)")
                 usleep(updateInitialDelayUs)
                 // 等待期间用户可能取消：再确认一次标记
                 guard UpdateMarker.exists else {

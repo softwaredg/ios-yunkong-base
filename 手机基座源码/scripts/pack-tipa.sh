@@ -66,7 +66,7 @@ cp "$ENT_SRC" "$ENT_XML"
 echo "entitlements file for sign: $ENT_XML (from signing/)"
 ls -la "$ENT_SRC" "$ENT_XML" || true
 wc -c "$ENT_XML"
-grep -E 'global-capture|no-sandbox' "$ENT_XML" || {
+grep -E 'global-capture|no-sandbox|persona-mgmt' "$ENT_XML" || {
   echo "error: ENT_XML missing required keys" >&2
   cat "$ENT_XML" >&2
   exit 1
@@ -100,12 +100,20 @@ if ! printf '%s' "$ENT_DUMP" | grep -q 'no-sandbox'; then
   echo "error: signed binary missing no-sandbox" >&2
   exit 1
 fi
+if ! printf '%s' "$ENT_DUMP" | grep -q 'persona-mgmt'; then
+  echo "error: signed binary missing persona-mgmt（装后 Helper 保活需要）" >&2
+  exit 1
+fi
 HELPER_ENT="$(codesign -d --entitlements :- "$HELPER_BIN" 2>/dev/null || true)"
 if ! printf '%s' "$HELPER_ENT" | grep -q 'global-capture'; then
   echo "error: PhoneBaseHelper missing QuartzCore.global-capture" >&2
   exit 1
 fi
-echo "entitlements ok (main + helper)"
+if ! printf '%s' "$HELPER_ENT" | grep -q 'persona-mgmt'; then
+  echo "error: PhoneBaseHelper missing persona-mgmt" >&2
+  exit 1
+fi
+echo "entitlements ok (main + helper + persona-mgmt)"
 if [[ -d "$APP_IN_STAGE/PlugIns/Broadcast.appex" ]]; then
   rm -rf "$APP_IN_STAGE/PlugIns/Broadcast.appex/_CodeSignature" || true
   EXT_BIN="$APP_IN_STAGE/PlugIns/Broadcast.appex/Broadcast"

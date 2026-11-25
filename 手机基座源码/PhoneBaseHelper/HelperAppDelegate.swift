@@ -1,4 +1,5 @@
 import UIKit
+import Darwin
 
 /// 独立 Helper：常驻投屏服务 + 装后/崩溃拉起主 App。
 @main
@@ -24,6 +25,10 @@ final class HelperAppDelegate: UIResponder, UIApplicationDelegate {
         window.isHidden = true
         self.window = window
 
+        // 先落盘：证明 Helper 已起来；装后拉起不依赖开服成败
+        AppRunLog.shared.append(
+            "Helper 进程启动 uid=\(getuid()) marker=\(UpdateMarker.exists ? 1 : 0) postUpdate=\(ProcessRole.postUpdateArmed ? 1 : 0)"
+        )
         HelperSupervisor.shared.start()
         // 必须同步开服：posix_spawn 出来的进程 main.async 常迟迟不跑，会出现 alive 但 11019 无响应
         let ok = BaseRuntime.shared.start(notifyStatus: true)
