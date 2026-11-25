@@ -12,7 +12,8 @@ if getuid() == 0 {
         "Helper root 拉起模式 uid=0 marker=\(UpdateMarker.exists ? 1 : 0) expect=\(ProcessRole.expectVersion)"
     )
     HelperSupervisor.shared.start()
-    RunLoop.main.run()
+    // RunLoop.main.run() 无源会立刻返回 → 装后 Helper 秒退；dispatchMain 常驻
+    dispatchMain()
 } else {
     UIApplicationMain(
         CommandLine.argc,

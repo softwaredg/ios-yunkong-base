@@ -28,6 +28,8 @@ final class DisplayCapture: NSObject {
     private var pool: CVPixelBufferPool?
     private var renderDisplay: RenderDisplayFn?
     private let displayName = "LCD" as CFString
+    /// 对齐样板 poolBusySkips：池分配失败时跳帧计数
+    private(set) var poolBusySkips: Int = 0
 
     var onPixelBuffer: ((CVPixelBuffer, CMTime) -> Void)?
 
@@ -46,7 +48,7 @@ final class DisplayCapture: NSObject {
     var backendName: String { backend.rawValue }
 
     func start() {
-        stop()
+        stop(releasePool: false)
         if pool == nil { _ = preparePool() }
         isActive = true
         wantsFrames = true
@@ -58,10 +60,19 @@ final class DisplayCapture: NSObject {
         NSLog("[Capture] start backend=%@ %dx%d", backendName, width, height)
     }
 
-    func stop() {
+    func stop(releasePool: Bool = false) {
         displayLink?.invalidate()
         displayLink = nil
         isActive = false
+        if releasePool {
+            pool = nil
+        }
+    }
+
+    /// softRestart / 内存护栏：拆掉 IOSurface 池，迫使下次 start 重建
+    func releasePixelBufferPool() {
+        pool = nil
+        NSLog("[Capture] releasePixelBufferPool skips=%d", poolBusySkips)
     }
 
     func setActive(_ active: Bool) {
@@ -152,6 +163,7 @@ final class DisplayCapture: NSObject {
         )
         guard status == kCVReturnSuccess, let buffer else {
             lastError = "pool alloc \(status)"
+            poolBusySkips += 1
             return nil
         }
         guard let surfaceUnmanaged = CVPixelBufferGetIOSurface(buffer) else {

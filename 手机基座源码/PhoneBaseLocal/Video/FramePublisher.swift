@@ -231,6 +231,13 @@ final class FramePublisher {
         let profiles = Array(Set(clients.map(\.profile)))
         let old = Array(lanes.values)
         lanes.removeAll()
+        pendingEncode = nil
+        encodeScheduled = false
+        for c in clients {
+            c.pendingVideo = nil
+            c.pendingIsKeyframe = false
+            c.congested = false
+        }
         var fresh: [Lane] = []
         for p in profiles {
             if let lane = ensureLaneLocked(p) { fresh.append(lane) }
@@ -239,9 +246,22 @@ final class FramePublisher {
             fresh.append(lane)
         }
         lock.unlock()
-        fresh.forEach { $0.startIfNeeded() }
+        // 先停旧编码器再启新车道，利于 phys_footprint 回落
         old.forEach { $0.encoder.stop() }
+        fresh.forEach { $0.startIfNeeded() }
         requestKeyframe()
+    }
+
+    /// 对齐样板 releaseUnusedMemory 的发送侧：丢掉积压帧
+    func discardPendingFrames() {
+        lock.lock()
+        pendingEncode = nil
+        encodeScheduled = false
+        for c in clients {
+            c.pendingVideo = nil
+            c.pendingIsKeyframe = false
+        }
+        lock.unlock()
     }
 
     func applyDefaultsFromSettings() {

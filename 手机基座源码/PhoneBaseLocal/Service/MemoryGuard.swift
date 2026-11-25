@@ -17,6 +17,8 @@ final class MemoryGuard {
     private(set) var historyMillis: [Int] = []
     private var lastRestartAt: Date?
     private var lastSoftAt: Date?
+    /// 上一拍是否已越过软阈（用于穿越回落时回调 onRecovered）
+    private var wasAboveSoft = false
     private var timer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "cn.local.phonebase.memory-guard")
     /// 连续超限多久才动作，避免毛刺
@@ -25,6 +27,10 @@ final class MemoryGuard {
     var onOverLimit: ((UInt64) -> Void)?
     /// 软阈值：优先降画质，勿与硬重启同一节流
     var onSoftLimit: ((UInt64) -> Void)?
+    /// 足迹回到软阈以下：清粘性降质
+    var onRecovered: (() -> Void)?
+    /// ≥2×硬阈或 ≥800MB：硬档不走 15s 节流，避免空转
+    private let vetoBytes: UInt64 = 800 * 1024 * 1024
 
     var status: [String: Any] {
         [
@@ -95,8 +101,16 @@ final class MemoryGuard {
         if cur < softLimitBytes {
             softLimitSince = nil
             overLimitSince = nil
+            if wasAboveSoft {
+                wasAboveSoft = false
+                lastSoftAt = nil
+                DispatchQueue.main.async { [weak self] in
+                    self?.onRecovered?()
+                }
+            }
             return
         }
+        wasAboveSoft = true
 
         // Soft: degrade encode before hard restart.
         if cur >= softLimitBytes && cur < limitBytes {
@@ -115,9 +129,12 @@ final class MemoryGuard {
         // Hard: over limitBytes
         softLimitSince = nil
         if overLimitSince == nil { overLimitSince = now }
-        guard let since = overLimitSince, now - since >= overLimitGraceSec else { return }
-        // 节流：15s 内不连着重启
-        if let last = lastRestartAt, Date().timeIntervalSince(last) < 15 { return }
+        // 极端足迹缩短 grace，尽快硬退
+        let extreme = cur >= vetoBytes || cur >= limitBytes &* 2
+        let grace = extreme ? 0.5 : overLimitGraceSec
+        guard let since = overLimitSince, now - since >= grace else { return }
+        // 普通硬档 15s 节流；极端足迹不节流（对齐样板：清不掉就整进程）
+        if !extreme, let last = lastRestartAt, Date().timeIntervalSince(last) < 15 { return }
         overLimitSince = nil
         DispatchQueue.main.async { [weak self] in
             self?.onOverLimit?(cur)
