@@ -21,6 +21,7 @@ private func posix_spawnattr_set_persona_gid_np(
 ) -> Int32
 
 /// 主 App 拉起 / 停止包内独立 `PhoneBaseHelper`。
+/// tipa 0.2.73 test marker: verify persona root relaunch
 enum HelperLauncher {
     private static let helperName = ProcessRole.helperExecutableName
     private static let gate = NSLock()
