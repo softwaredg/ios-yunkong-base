@@ -4,15 +4,30 @@ import UIKit
 final class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
     private var runtime: BaseRuntime?
+    /// 看门狗/relauncher 进程持有，避免被系统过早回收
+    private var watchdogBgTask: UIBackgroundTaskIdentifier = .invalid
 
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        // watchdog 子进程不进 UI / 不启服务；主进程崩了由它拉起
+        // watchdog / relauncher：不启投屏服务，但必须保活 runloop + 音频，否则秒挂起
         if ProcessWatchdog.bootstrapIfNeeded() {
-            return false
+            BackgroundKeepAlive.shared.start()
+            watchdogBgTask = application.beginBackgroundTask(withName: "phonebase-watchdog") { [weak self] in
+                guard let self else { return }
+                if self.watchdogBgTask != .invalid {
+                    application.endBackgroundTask(self.watchdogBgTask)
+                    self.watchdogBgTask = .invalid
+                }
+            }
+            // 零尺寸窗，避免再占一层 UI；runloop 仍要转
+            let window = UIWindow(frame: .zero)
+            window.isHidden = true
+            self.window = window
+            return true
         }
+
         let runtime = BaseRuntime.shared
         self.runtime = runtime
         let window = UIWindow(frame: UIScreen.main.bounds)
