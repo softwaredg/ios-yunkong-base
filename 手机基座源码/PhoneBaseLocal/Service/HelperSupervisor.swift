@@ -7,10 +7,11 @@ final class HelperSupervisor {
     static let shared = HelperSupervisor()
 
     private var queue: DispatchQueue?
-    private let updateInitialDelayUs: useconds_t = 20_000_000
+    /// 父进程退出后稍等再拉起（覆盖安装落盘）
+    private let updateInitialDelayUs: useconds_t = 3_000_000
     private let retryUs: useconds_t = 3_000_000
     private let windowSec: TimeInterval = 180
-    /// 装后拉起最多 3 个窗口（约 3×(20s+3min)），避免失败后永久空转
+    /// 装后拉起最多 3 个窗口（约 3×(3s+3min)），避免失败后永久空转
     private let maxPullWindows = 3
 
     func start() {

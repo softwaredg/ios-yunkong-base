@@ -69,8 +69,8 @@ enum HelperLauncher {
             AppRunLog.shared.append("已武装装后拉起（本进程即 Helper）expect=\(expect)")
             return
         }
-        // 必须有真正的 Helper 在听，且主进程没占口
-        if !BaseRuntime.shared.isRunning, isHelperAlive(), tipaHealthy(expectVersion: "") {
+        // 装后拉起只要求 Helper 进程在（Supervisor 已跑）；听口与否不挡武装
+        if !BaseRuntime.shared.isRunning, isHelperAlive() {
             AppRunLog.shared.append("已武装装后拉起（Helper 仍在）expect=\(expect)")
             return
         }
@@ -87,8 +87,8 @@ enum HelperLauncher {
         _ = ensureRunning(postUpdate: true, expectVersion: expect)
         let alive = isHelperAlive()
         AppRunLog.shared.append("已武装 Helper 装后拉起 expect=\(expect) alive=\(alive ? 1 : 0)")
-        // Helper 仍起不来：恢复主进程服务，装后只能手动打开（标记仍保留）
-        if !alive, !tipaHealthy(expectVersion: "") {
+        // 仅当 Helper 进程也不在时，才回退主进程开服（标记仍保留，装后可能需手动打开）
+        if !alive {
             AppRunLog.shared.append("Helper 武装失败，恢复主进程开服（装后请手动打开）")
             if Thread.isMainThread {
                 _ = BaseRuntime.shared.start(notifyStatus: true)
@@ -198,7 +198,12 @@ enum HelperLauncher {
         AppRunLog.shared.append(
             "Helper 已 spawn，但健康检查超时 expect=\(probeExpect.isEmpty ? "any" : probeExpect) alive=\(alive ? 1 : 0)"
         )
-        // 僵死 Helper（进程在但不听口）立刻清掉，避免占资源
+        // 装前武装：超时不杀——Supervisor 已在跑，杀了就没人装后拉主 App
+        if postUpdate, alive {
+            AppRunLog.shared.append("听口超时但保留 Helper Supervisor，供装后拉起")
+            return true
+        }
+        // 日常 ensure：僵死 Helper（进程在但不听口）清掉，避免占资源
         if alive {
             kill(pid, SIGTERM)
             usleep(50_000)
