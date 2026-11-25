@@ -336,7 +336,7 @@ final class RootViewController: UIViewController {
                 )
                 var text = "有新版 \(manifest.version)（本机 \(local)）"
                 if !manifest.notes.isEmpty { text += "\n\(manifest.notes)" }
-                text += "\n点上方按钮用巨魔安装"
+                text += "\n点上方按钮将自动跳转巨魔安装"
                 self.updateHint.text = text
                 AppRunLog.shared.append("发现新版 \(manifest.version)（本机 \(local)）")
             case let .failed(msg):

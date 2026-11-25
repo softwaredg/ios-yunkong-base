@@ -1,7 +1,7 @@
 import Foundation
 import UIKit
 
-/// 手机端自检 tipa 更新：拉清单 → 下载 → DocumentInteraction 交给巨魔（失败再 magnifier）。
+/// 手机端自检 tipa 更新：拉清单 → apple-magnifier:// 直跳巨魔（失败再下载 + DocumentInteraction）。
 enum TipaSelfUpdate {
     static let manifestURL = URL(string: "https://touping.facaishu.vip/api/tipa/update")!
 
