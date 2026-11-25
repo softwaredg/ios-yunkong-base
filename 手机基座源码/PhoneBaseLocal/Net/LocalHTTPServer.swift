@@ -22,6 +22,8 @@ final class LocalHTTPServer {
     var onControlAPI: ((String, [String: String]) -> Data)?
     /// GET/POST /api/video-settings；body 为 POST JSON（可空）
     var onVideoSettings: ((String, [String: String], Data?) -> Data)?
+    /// GET /api/clipboard/text（对齐样板）
+    var onClipboardText: (() -> Data)?
     var onVideoConnect: ((WebSocketSession, [String: String]) -> Void)?
     var onControlConnect: ((WebSocketSession) -> Void)?
 
@@ -259,6 +261,9 @@ final class LocalHTTPServer {
             let bodyData = leftover.isEmpty ? nil : leftover
             let body = onVideoSettings?(method, query, bodyData)
                 ?? Data(#"{"ok":false,"error":"no-handler"}"#.utf8)
+            respond(fd: fd, status: 200, contentType: "application/json", body: body)
+        } else if method == "GET" && path == "/api/clipboard/text" {
+            let body = onClipboardText?() ?? Data(#"{"ok":false,"error":"unavailable"}"#.utf8)
             respond(fd: fd, status: 200, contentType: "application/json", body: body)
         } else if method == "OPTIONS" {
             respond(fd: fd, status: 204, contentType: "text/plain", body: Data())

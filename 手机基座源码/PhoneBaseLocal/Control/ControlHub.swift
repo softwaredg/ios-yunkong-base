@@ -35,6 +35,20 @@ final class ControlHub {
         self.keyboardAvailable = keyboardAvailable
     }
 
+    /// 手机 → PC：广播剪贴板文本（运行日志「复制」等）
+    func broadcastClipboard(_ raw: String) {
+        let text = String(raw.prefix(256_000))
+        guard !text.isEmpty else { return }
+        lock.lock()
+        let copy = sessions
+        lock.unlock()
+        let body: [String: Any] = ["type": "clipboard", "text": text]
+        guard let data = try? JSONSerialization.data(withJSONObject: body),
+              let payload = String(data: data, encoding: .utf8)
+        else { return }
+        copy.forEach { $0.sendText(payload) }
+    }
+
     /// 手机横竖变化 → revision++ 并广播 geometry，桌面窗据此自动旋转
     func publishOrientation(_ next: Int) {
         guard (1 ... 8).contains(next) else { return }

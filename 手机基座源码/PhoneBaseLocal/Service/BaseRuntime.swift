@@ -105,6 +105,15 @@ final class BaseRuntime {
                 self?.handleVideoSettings(method: method, query: query, body: body)
                     ?? Data(#"{"ok":false}"#.utf8)
             }
+            srv.onClipboardText = {
+                let text = UIPasteboard.general.string ?? ""
+                if text.utf8.count > 256_000 {
+                    return Data(#"{"ok":false,"error":"CLIPBOARD_TOO_LARGE"}"#.utf8)
+                }
+                let body: [String: Any] = ["ok": true, "text": text]
+                return (try? JSONSerialization.data(withJSONObject: body))
+                    ?? Data(#"{"ok":false,"error":"CLIPBOARD_UNAVAILABLE"}"#.utf8)
+            }
         }
         wire(server)
         wire(usbServer)
@@ -359,6 +368,11 @@ final class BaseRuntime {
         if active && isRunning {
             publisher.requestKeyframe()
         }
+    }
+
+    /// 同步文本到已连接的 PC 控制通道（写电脑剪贴板）
+    func pushClipboardToPC(_ text: String) {
+        controlHub.broadcastClipboard(text)
     }
 
     private func startupMessage(retired: [String], extra: String?) -> String {

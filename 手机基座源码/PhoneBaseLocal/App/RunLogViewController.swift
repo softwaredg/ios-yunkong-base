@@ -84,11 +84,13 @@ final class RunLogViewController: UIViewController {
         }
         // 只用 string；再 setItems 在部分系统上会把剪贴板写空
         UIPasteboard.general.string = text
+        // 同步到已连接的电脑剪贴板（仅写手机剪贴板电脑粘不到）
+        BaseRuntime.shared.pushClipboardToPC(text)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         flashCopyTitle("已复制")
         let tip = UIAlertController(
             title: nil,
-            message: "已复制 \(text.count) 字到剪贴板",
+            message: "已复制 \(text.count) 字到手机与电脑剪贴板",
             preferredStyle: .alert
         )
         present(tip, animated: true)
