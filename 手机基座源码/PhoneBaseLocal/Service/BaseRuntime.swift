@@ -29,9 +29,9 @@ final class BaseRuntime {
     private var orientationObserver: NSObjectProtocol?
     private var orientationPoll: DispatchSourceTimer?
     private var lastPublishedOrientation = 1
-    /// 投屏/探活会狂 accept，运行日志按 IP 节流
+    /// 探活会狂 accept：运行日志按 key 强节流；日常 HTTP 探测不再逐条记
     private var lastConnLogAt: [String: Date] = [:]
-    private let connLogMinInterval: TimeInterval = 12
+    private let connLogMinInterval: TimeInterval = 120
     /// memory-guard 硬重启连击：达到阈值则 hard exit，交给 ProcessWatchdog
     private var memHardStreak = 0
 
@@ -80,17 +80,23 @@ final class BaseRuntime {
             srv.onAccepted = { [weak self] count, ip in
                 guard let self else { return }
                 let tag = listenPort == self.usbPort ? "USB" : "LAN"
-                let line = "有连接 #\(count) \(tag) from \(ip)"
-                self.onStatus?(line)
-                self.appendConnLogThrottled(line, key: "\(tag)|\(ip)")
+                // 探活/info 也会 accept：只刷新顶栏，不写运行日志（避免刷屏）
+                self.onStatus?("有连接 #\(count) \(tag)")
             }
             srv.onVideoConnect = { [weak self] session, query in
                 guard let self else { return }
+                let tag = listenPort == self.usbPort ? "USB" : "LAN"
                 let profile = VideoStreamProfile.from(query: query, defaults: VideoSettingsStore.shared.defaults)
+                let preview = (query["preview"] == "1" || query["preview"]?.lowercased() == "true")
+                let kind = preview ? "预览" : "大窗"
+                self.appendConnLogThrottled("视频通道 \(kind) · \(tag)", key: "video|\(tag)|\(kind)")
                 self.publisher.attach(session, profile: profile)
             }
             srv.onControlConnect = { [weak self] session in
-                self?.controlHub.attach(session)
+                guard let self else { return }
+                let tag = listenPort == self.usbPort ? "USB" : "LAN"
+                self.appendConnLogThrottled("控制通道已连接 · \(tag)", key: "control|\(tag)")
+                self.controlHub.attach(session)
             }
             srv.onControlAPI = { [weak self] path, query in
                 self?.handleControlAPI(path: path, query: query) ?? Data(#"{"ok":false}"#.utf8)
@@ -382,15 +388,15 @@ final class BaseRuntime {
         onStatus?(text)
     }
 
-    /// UI 每次刷新；日志同一 IP 至少间隔 connLogMinInterval，避免刷屏。
+    /// 同类事件至少间隔 connLogMinInterval，避免刷屏。
     private func appendConnLogThrottled(_ line: String, key: String) {
         let now = Date()
         if let last = lastConnLogAt[key], now.timeIntervalSince(last) < connLogMinInterval {
             return
         }
         lastConnLogAt[key] = now
-        if lastConnLogAt.count > 32 {
-            let cutoff = now.addingTimeInterval(-connLogMinInterval * 4)
+        if lastConnLogAt.count > 24 {
+            let cutoff = now.addingTimeInterval(-connLogMinInterval * 3)
             lastConnLogAt = lastConnLogAt.filter { $0.value >= cutoff }
         }
         AppRunLog.shared.append(line)
