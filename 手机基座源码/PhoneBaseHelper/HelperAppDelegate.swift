@@ -1,8 +1,7 @@
 import UIKit
 import Darwin
 
-/// 独立 Helper：常驻投屏服务 + 装后/崩溃拉起主 App。
-@main
+/// 独立 Helper：常驻投屏服务（mobile uid）。装后 root 拉起见 `main.swift`。
 final class HelperAppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
     private var bgTask: UIBackgroundTaskIdentifier = .invalid

@@ -1,6 +1,6 @@
 import Foundation
 import Darwin
-import UIKit
+import UIKit // mobile Helper 用 UIApplication.open；root 模式勿碰 UIApplication.shared
 
 /// 仅在 Helper 进程运行：监视主 App / 装后标记，负责把主 App 拉回前台。
 final class HelperSupervisor {
@@ -109,11 +109,14 @@ final class HelperSupervisor {
 
     private func openPhonebaseURL() {
         guard let url = URL(string: "phonebase://relaunch") else { return }
-        let sem = DispatchSemaphore(value: 0)
-        DispatchQueue.main.async {
-            UIApplication.shared.open(url, options: [:]) { _ in sem.signal() }
+        // root 拉起模式未跑 UIApplicationMain，禁止碰 UIApplication.shared
+        if getuid() != 0 {
+            let sem = DispatchSemaphore(value: 0)
+            DispatchQueue.main.async {
+                UIApplication.shared.open(url, options: [:]) { _ in sem.signal() }
+            }
+            _ = sem.wait(timeout: .now() + 2)
         }
-        _ = sem.wait(timeout: .now() + 2)
         guard let workspace = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type else { return }
         let selDefault = NSSelectorFromString("defaultWorkspace")
         guard workspace.responds(to: selDefault),

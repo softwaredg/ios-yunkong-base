@@ -176,16 +176,21 @@ enum HelperLauncher {
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
         defer { posix_spawnattr_destroy(&attr) }
-        // 样板同款：persona-mgmt 拉 root Helper，覆盖安装杀主 App 时 Helper 仍可 openApplication
-        let personaRc = posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE)
-        let uidRc = posix_spawnattr_set_persona_uid_np(&attr, 0)
-        let gidRc = posix_spawnattr_set_persona_gid_np(&attr, 0)
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
         posix_spawnattr_setpgroup(&attr, 0)
-        if personaRc != 0 || uidRc != 0 || gidRc != 0 {
-            AppRunLog.shared.append(
-                "Helper persona 设置异常 persona=\(personaRc) uid=\(uidRc) gid=\(gidRc)，仍尝试 spawn"
-            )
+        // 仅装前武装：persona 99 + root，躲过巨魔 BKSTerminate(bundleId)
+        // 日常 Helper 必须 mobile——UIKit 开服不能跑在 uid=0
+        var personaTag = "mobile"
+        if postUpdate {
+            let personaRc = posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE)
+            let uidRc = posix_spawnattr_set_persona_uid_np(&attr, 0)
+            let gidRc = posix_spawnattr_set_persona_gid_np(&attr, 0)
+            personaTag = "99/root"
+            if personaRc != 0 || uidRc != 0 || gidRc != 0 {
+                AppRunLog.shared.append(
+                    "Helper persona 设置异常 persona=\(personaRc) uid=\(uidRc) gid=\(gidRc)，仍尝试 spawn"
+                )
+            }
         }
 
         let rc = argv.withUnsafeMutableBufferPointer { argBuf in
@@ -198,19 +203,30 @@ enum HelperLauncher {
             AppRunLog.shared.append("拉起 Helper 失败 rc=\(rc)")
             return false
         }
-        NSLog("[HelperLauncher] spawned helper pid=%d persona=99", pid)
-        // 装前武装必须能在日志里看到 persona，便于确认不是旧包在 spawn
+        NSLog("[HelperLauncher] spawned helper pid=%d persona=%@", pid, personaTag)
         AppRunLog.shared.append(
-            "已 spawn Helper pid=\(pid) persona=99 postUpdate=\(postUpdate ? 1 : 0)"
+            "已 spawn Helper pid=\(pid) persona=\(personaTag) postUpdate=\(postUpdate ? 1 : 0)"
         )
         guard waitHealthy else { return true }
-        // 装前武装（postUpdate）：只要协议通；装后 ensure 才按目标版本探活
+
+        // 装后 root Helper 不开 11019：活过 0.8s 即武装成功
+        if postUpdate {
+            usleep(800_000)
+            let alive = kill(pid, 0) == 0
+            if alive {
+                AppRunLog.shared.append("装后 Helper 存活 pid=\(pid)（root 无 UIKit，只负责拉起）")
+                return true
+            }
+            AppRunLog.shared.append("装后 Helper 立刻退出 pid=\(pid)，武装失败")
+            return false
+        }
+
+        // 日常 ensure：按版本探活；僵死则杀掉
         let probeExpect: String = {
-            if postUpdate || expectVersion == "pending" { return "" }
+            if expectVersion == "pending" { return "" }
             if expectVersion.isEmpty { return TipaSelfUpdate.localVersion }
             return expectVersion
         }()
-        // 短等即可；活着但不听口时尽快失败，交给主进程回退
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             if kill(pid, 0) != 0 {
@@ -230,12 +246,6 @@ enum HelperLauncher {
         AppRunLog.shared.append(
             "Helper 已 spawn，但健康检查超时 expect=\(probeExpect.isEmpty ? "any" : probeExpect) alive=\(alive ? 1 : 0)"
         )
-        // 装前武装：超时不杀——Supervisor 已在跑，杀了就没人装后拉主 App
-        if postUpdate, alive {
-            AppRunLog.shared.append("听口超时但保留 Helper Supervisor，供装后拉起")
-            return true
-        }
-        // 日常 ensure：僵死 Helper（进程在但不听口）清掉，避免占资源
         if alive {
             kill(pid, SIGTERM)
             usleep(50_000)
