@@ -7,12 +7,12 @@ struct VideoStreamProfile: Hashable {
     var frameRate: Int
     var bitrateBps: Int
 
-    /// Stable default (was full-res 6M@60 — tipa footprint often >400MB → memory-guard).
+    /// 对齐样板大窗：全分辨率 6Mbps@60；内存靠 MemoryGuard 临时降质，不永久砍默认。
     static let foregroundDefault = VideoStreamProfile(
         profile: "foreground",
-        maxDimension: 720,
-        frameRate: 30,
-        bitrateBps: 3_000_000
+        maxDimension: 0,
+        frameRate: 60,
+        bitrateBps: 6_000_000
     )
 
     var key: String {
@@ -181,11 +181,12 @@ final class VideoSettingsStore {
         if next.frameRate > 0 {
             requestedFrameRate = fps
         }
+        // 0 = 全分辨率（样板默认）；勿把 0 当成「未设置」而沿用旧 720 上限
         let dim: Int
         if next.maxDimension > 0 {
             dim = clamp(next.maxDimension, 128, 1280)
         } else {
-            dim = _defaults.maxDimension
+            dim = 0
         }
         _defaults = VideoStreamProfile(
             profile: "foreground",
