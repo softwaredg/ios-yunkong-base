@@ -199,9 +199,10 @@ enum HelperLauncher {
             return false
         }
         NSLog("[HelperLauncher] spawned helper pid=%d persona=99", pid)
-        if postUpdate {
-            AppRunLog.shared.append("已 spawn Helper pid=\(pid) persona=99（装后保活）")
-        }
+        // 装前武装必须能在日志里看到 persona，便于确认不是旧包在 spawn
+        AppRunLog.shared.append(
+            "已 spawn Helper pid=\(pid) persona=99 postUpdate=\(postUpdate ? 1 : 0)"
+        )
         guard waitHealthy else { return true }
         // 装前武装（postUpdate）：只要协议通；装后 ensure 才按目标版本探活
         let probeExpect: String = {
