@@ -90,6 +90,8 @@ enum TipaSelfUpdate {
             completion?(false)
             return false
         }
+        // 巨魔装完不会自己回跳；武装看门狗在覆盖杀进程后延迟拉起
+        ProcessWatchdog.prepareForSelfUpdate(expectVersion: manifest.version)
         UIApplication.shared.open(u, options: [:]) { ok in
             DispatchQueue.main.async { completion?(ok) }
         }
