@@ -2,6 +2,7 @@ import Foundation
 import Darwin
 
 /// 对齐官方 Direct 拉 Helper：旁路 watchdog 进程，主进程崩了再拉起本 App。
+/// 使用独立进程组，降低与主进程一同被 jetsam 杀掉的概率。
 enum ProcessWatchdog {
     private static let roleKey = "PHONEBASE_ROLE"
     private static let parentKey = "PHONEBASE_PARENT_PID"
@@ -33,9 +34,18 @@ enum ProcessWatchdog {
         var envp = cStringArray(envList)
         defer { freeCStringArray(envp) }
 
+        var attr = posix_spawnattr_t()
+        posix_spawnattr_init(&attr)
+        // New process group — survive some parent jetsam / killpg paths better.
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
+        posix_spawnattr_setpgroup(&attr, 0)
+        defer { posix_spawnattr_destroy(&attr) }
+
         let rc = argv.withUnsafeMutableBufferPointer { argBuf in
             envp.withUnsafeMutableBufferPointer { envBuf in
-                posix_spawn(&pid, exec, nil, nil, argBuf.baseAddress, envBuf.baseAddress)
+                withUnsafeMutablePointer(to: &attr) { attrPtr in
+                    posix_spawn(&pid, exec, nil, attrPtr, argBuf.baseAddress, envBuf.baseAddress)
+                }
             }
         }
         if rc == 0 {
@@ -52,7 +62,21 @@ enum ProcessWatchdog {
             if kill(parentPid, 0) != 0 {
                 NSLog("[Watchdog] parent %d gone → relaunch", parentPid)
                 usleep(throttleSec)
-                relaunchApp()
+                let bid = Bundle.main.bundleIdentifier ?? "cn.iosmirror.base"
+                // One primary open; only retry if LS open failed (avoid stacking copies).
+                if openApplication(bid) {
+                    NSLog("[Watchdog] relaunched via openApplication")
+                    exit(0)
+                }
+                relaunchViaSpawn()
+                for i in 1 ... 2 {
+                    usleep(1_500_000)
+                    if openApplication(bid) {
+                        NSLog("[Watchdog] relaunch retry %d via openApplication", i)
+                        exit(0)
+                    }
+                    NSLog("[Watchdog] relaunch retry %d openApplication failed", i)
+                }
                 exit(0)
             }
             usleep(500_000)
@@ -62,6 +86,10 @@ enum ProcessWatchdog {
     private static func relaunchApp() {
         let bid = Bundle.main.bundleIdentifier ?? "cn.iosmirror.base"
         if openApplication(bid) { return }
+        relaunchViaSpawn()
+    }
+
+    private static func relaunchViaSpawn() {
         guard let exec = Bundle.main.executablePath else { return }
         var pid: pid_t = 0
         var argv = cStringArray([exec])
@@ -73,9 +101,16 @@ enum ProcessWatchdog {
         }
         var envp = cStringArray(envList)
         defer { freeCStringArray(envp) }
+        var attr = posix_spawnattr_t()
+        posix_spawnattr_init(&attr)
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
+        posix_spawnattr_setpgroup(&attr, 0)
+        defer { posix_spawnattr_destroy(&attr) }
         let rc = argv.withUnsafeMutableBufferPointer { argBuf in
             envp.withUnsafeMutableBufferPointer { envBuf in
-                posix_spawn(&pid, exec, nil, nil, argBuf.baseAddress, envBuf.baseAddress)
+                withUnsafeMutablePointer(to: &attr) { attrPtr in
+                    posix_spawn(&pid, exec, nil, attrPtr, argBuf.baseAddress, envBuf.baseAddress)
+                }
             }
         }
         NSLog("[Watchdog] posix_spawn relaunch pid=%d rc=%d", pid, rc)

@@ -32,6 +32,8 @@ final class BaseRuntime {
     /// 投屏/探活会狂 accept，运行日志按 IP 节流
     private var lastConnLogAt: [String: Date] = [:]
     private let connLogMinInterval: TimeInterval = 12
+    /// memory-guard 硬重启连击：达到阈值则 hard exit，交给 ProcessWatchdog
+    private var memHardStreak = 0
 
     private init() {
         let size = DeviceIdentity.screenSize()
@@ -108,11 +110,53 @@ final class BaseRuntime {
             self?.publisher.encode(buffer: buffer, presentationTime: pts)
         }
 
+        MemoryGuard.shared.onSoftLimit = { [weak self] bytes in
+            self?.degradeForMemory(bytes: bytes)
+        }
         MemoryGuard.shared.onOverLimit = { [weak self] bytes in
-            self?.softRestart(reason: "memory-guard", detail: "footprint=\(bytes)")
+            self?.handleMemoryHard(bytes: bytes)
         }
         MemoryGuard.shared.start()
         InterfaceOrientationWatch.bootstrap()
+    }
+
+    /// 软阈值：先降前景画质，避免一上来 softRestart 空转。
+    private func degradeForMemory(bytes: UInt64, resetHardStreak: Bool = true) {
+        let cur = VideoSettingsStore.shared.defaults
+        let need =
+            cur.frameRate > 20 ||
+            cur.bitrateBps > 2_000_000 ||
+            cur.maxDimension == 0 ||
+            cur.maxDimension > 720
+        guard need else {
+            notify("内存偏高 · 画质已是低档 footprint=\(bytes)")
+            return
+        }
+        let degraded = VideoStreamProfile(
+            profile: "foreground",
+            maxDimension: 720,
+            frameRate: 20,
+            bitrateBps: 2_000_000
+        )
+        _ = VideoSettingsStore.shared.apply(degraded)
+        publisher.applyDefaultsFromSettings()
+        if resetHardStreak { memHardStreak = 0 }
+        notify("内存偏高 · 已降画质 20fps/2Mbps/720 footprint=\(bytes)")
+    }
+
+    /// 硬阈值：softRestart；连续失败则 hard exit 让看门狗拉起。
+    private func handleMemoryHard(bytes: UInt64) {
+        degradeForMemory(bytes: bytes, resetHardStreak: false)
+        memHardStreak += 1
+        if memHardStreak >= 3 {
+            notify("内存仍高 · 硬重启并由看门狗拉起 footprint=\(bytes)")
+            MemoryGuard.shared.noteRestart(reason: "memory-guard-hard")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                exit(0)
+            }
+            return
+        }
+        _ = softRestart(reason: "memory-guard", detail: "footprint=\(bytes) streak=\(memHardStreak)")
     }
 
     private func handleVideoSettings(method: String, query: [String: String], body: Data?) -> Data {

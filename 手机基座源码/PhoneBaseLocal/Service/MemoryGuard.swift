@@ -1,30 +1,39 @@
 import Foundation
 import Darwin
 
-/// 对齐官方 `--memory-guard`：超限自动触发重启回调。
+/// 对齐官方 `--memory-guard`：软阈值先降画质，硬阈值再触发重启回调。
 final class MemoryGuard {
     static let shared = MemoryGuard()
 
-    /// 默认 400MB；官方 Helper 也靠足迹触发，不追求精确阈值
+    /// 软阈值：先回调 onSoftLimit（降码率），默认 320MB
+    var softLimitBytes: UInt64 = 320 * 1024 * 1024
+    /// 硬阈值：回调 onOverLimit（soft/hard restart），默认 400MB
     var limitBytes: UInt64 = 400 * 1024 * 1024
     private(set) var automatic = true
     private(set) var overLimitSince: TimeInterval?
+    private(set) var softLimitSince: TimeInterval?
     private(set) var restartCount = 0
     /// 最近若干次重启间隔（ms），对齐 historyMillis
     private(set) var historyMillis: [Int] = []
     private var lastRestartAt: Date?
+    private var lastSoftAt: Date?
     private var timer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "cn.local.phonebase.memory-guard")
-    /// 连续超限多久才重启，避免毛刺
+    /// 连续超限多久才动作，避免毛刺
     private let overLimitGraceSec: TimeInterval = 3
+    private let softGraceSec: TimeInterval = 2
     var onOverLimit: ((UInt64) -> Void)?
+    /// 软阈值：优先降画质，勿与硬重启同一节流
+    var onSoftLimit: ((UInt64) -> Void)?
 
     var status: [String: Any] {
         [
             "automatic": automatic,
+            "softLimitBytes": softLimitBytes,
             "limitBytes": limitBytes,
             "currentBytes": Self.physFootprint(),
             "overLimitSince": overLimitSince as Any,
+            "softLimitSince": softLimitSince as Any,
             "historyMillis": historyMillis,
             "historyCount": historyMillis.count,
             "restartCount": restartCount,
@@ -33,7 +42,10 @@ final class MemoryGuard {
 
     func setEnabled(_ on: Bool) {
         automatic = on
-        if !on { overLimitSince = nil }
+        if !on {
+            overLimitSince = nil
+            softLimitSince = nil
+        }
         persist()
     }
 
@@ -52,6 +64,7 @@ final class MemoryGuard {
         timer?.cancel()
         timer = nil
         overLimitSince = nil
+        softLimitSince = nil
     }
 
     func noteRestart(reason: String) {
@@ -64,6 +77,7 @@ final class MemoryGuard {
         lastRestartAt = now
         restartCount += 1
         overLimitSince = nil
+        softLimitSince = nil
         persist()
         NSLog("[MemoryGuard] restart reason=%@ count=%d", reason, restartCount)
     }
@@ -76,11 +90,30 @@ final class MemoryGuard {
     private func tick() {
         guard automatic else { return }
         let cur = Self.physFootprint()
-        if cur < limitBytes {
+        let now = Date().timeIntervalSince1970
+
+        if cur < softLimitBytes {
+            softLimitSince = nil
             overLimitSince = nil
             return
         }
-        let now = Date().timeIntervalSince1970
+
+        // Soft: degrade encode before hard restart.
+        if cur >= softLimitBytes && cur < limitBytes {
+            overLimitSince = nil
+            if softLimitSince == nil { softLimitSince = now }
+            guard let since = softLimitSince, now - since >= softGraceSec else { return }
+            if let last = lastSoftAt, Date().timeIntervalSince(last) < 20 { return }
+            softLimitSince = nil
+            lastSoftAt = Date()
+            DispatchQueue.main.async { [weak self] in
+                self?.onSoftLimit?(cur)
+            }
+            return
+        }
+
+        // Hard: over limitBytes
+        softLimitSince = nil
         if overLimitSince == nil { overLimitSince = now }
         guard let since = overLimitSince, now - since >= overLimitGraceSec else { return }
         // 节流：15s 内不连着重启

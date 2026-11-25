@@ -7,18 +7,19 @@ struct VideoStreamProfile: Hashable {
     var frameRate: Int
     var bitrateBps: Int
 
+    /// Stable default (was full-res 6M@60 — tipa footprint often >400MB → memory-guard).
     static let foregroundDefault = VideoStreamProfile(
         profile: "foreground",
-        maxDimension: 0,
-        frameRate: 60,
-        bitrateBps: 6_000_000
+        maxDimension: 720,
+        frameRate: 30,
+        bitrateBps: 3_000_000
     )
 
     var key: String {
         if profile == "wall" {
             return "wall:\(maxDimension)@\(frameRate)@\(bitrateBps)"
         }
-        return "fg:\(frameRate)@\(bitrateBps)"
+        return "fg:\(maxDimension)@\(frameRate)@\(bitrateBps)"
     }
 
     var isWall: Bool { profile == "wall" }
@@ -28,7 +29,20 @@ struct VideoStreamProfile: Hashable {
     static func from(query: [String: String], defaults: VideoStreamProfile) -> VideoStreamProfile {
         let rawProfile = (query["profile"] ?? "foreground").lowercased()
         if rawProfile != "wall" {
-            return defaults
+            var next = defaults
+            next.profile = "foreground"
+            if let dim = Int(query["maxDimension"] ?? ""), dim > 0 {
+                next.maxDimension = clamp(dim, 128, 1280)
+            }
+            if let fps = Int(query["frameRate"] ?? ""), fps > 0 {
+                next.frameRate = clamp(fps, 5, 60)
+            }
+            if let mbps = Double(query["bitrateMbps"] ?? "") {
+                next.bitrateBps = clamp(Int(mbps * 1_000_000), 400_000, 20_000_000)
+            } else if let bps = Int(query["bitrateBps"] ?? "") {
+                next.bitrateBps = clamp(bps, 400_000, 20_000_000)
+            }
+            return next
         }
         let dim = clamp(Int(query["maxDimension"] ?? "") ?? 384, 128, 1280)
         let fps = Int(query["frameRate"] ?? "") ?? 15
@@ -55,10 +69,13 @@ struct VideoStreamProfile: Hashable {
             next.profile = "wall"
         } else if json["profile"] != nil {
             next.profile = "foreground"
-            next.maxDimension = 0
         }
         if let d = intVal(json["maxDimension"]) {
-            next.maxDimension = next.profile == "wall" ? clamp(d, 128, 1280) : 0
+            if next.profile == "wall" {
+                next.maxDimension = clamp(d, 128, 1280)
+            } else {
+                next.maxDimension = d > 0 ? clamp(d, 128, 1280) : 0
+            }
         }
         if let f = intVal(json["frameRate"]) {
             next.frameRate = clamp(f, 5, 60)
@@ -81,11 +98,11 @@ struct VideoStreamProfile: Hashable {
         ]
     }
 
-    /// 在源尺寸上按 maxDimension 等比缩小（偶数）
+    /// 在源尺寸上按 maxDimension 等比缩小（偶数）；墙流与前景大窗共用。
     func encodeSize(sourceW: Int, sourceH: Int) -> (Int, Int) {
         let w0 = max(2, sourceW - (sourceW % 2))
         let h0 = max(2, sourceH - (sourceH % 2))
-        guard isWall, maxDimension > 0 else { return (w0, h0) }
+        guard maxDimension > 0 else { return (w0, h0) }
         let longEdge = max(w0, h0)
         if longEdge <= maxDimension { return (w0, h0) }
         let scale = Double(maxDimension) / Double(longEdge)
@@ -164,9 +181,15 @@ final class VideoSettingsStore {
         if next.frameRate > 0 {
             requestedFrameRate = fps
         }
+        let dim: Int
+        if next.maxDimension > 0 {
+            dim = clamp(next.maxDimension, 128, 1280)
+        } else {
+            dim = _defaults.maxDimension
+        }
         _defaults = VideoStreamProfile(
             profile: "foreground",
-            maxDimension: 0,
+            maxDimension: dim,
             frameRate: fps,
             bitrateBps: mbps * 1_000_000
         )
@@ -198,7 +221,7 @@ final class VideoSettingsStore {
         let maxBps = maxBitrateMbps * 1_000_000
         return VideoStreamProfile(
             profile: "foreground",
-            maxDimension: 0,
+            maxDimension: base.maxDimension,
             frameRate: base.frameRate,
             bitrateBps: min(maxBps, max(minBps, br))
         )
