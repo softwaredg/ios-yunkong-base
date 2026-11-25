@@ -28,8 +28,8 @@ final class TipaInstallGuideViewController: UIViewController {
         titleLabel.textAlignment = .center
 
         detailLabel.text = manifest.notes.isEmpty
-            ? "点下方按钮打开巨魔（TrollStore）安装。\n在巨魔里点「安装」，装完再回到本应用。\n若跳到「放大镜」：巨魔设置里打开 URL Scheme。"
-            : "\(manifest.notes)\n\n点下方按钮打开巨魔安装。装完后回到本应用即可。\n若跳到「放大镜」：巨魔设置里打开 URL Scheme。"
+            ? "点下方按钮打开巨魔（TrollStore）安装。\n装完后会尝试自动重新打开本应用；若未打开请点桌面图标。\n若跳到「放大镜」：巨魔设置里打开 URL Scheme。"
+            : "\(manifest.notes)\n\n点下方打开巨魔安装。装完后会尝试自动打开；未打开请点桌面图标。\n若跳到「放大镜」：巨魔设置里打开 URL Scheme。"
         detailLabel.font = .systemFont(ofSize: 15, weight: .regular)
         detailLabel.textColor = BaseChrome.textSecondary
         detailLabel.textAlignment = .center
@@ -97,13 +97,14 @@ final class TipaInstallGuideViewController: UIViewController {
             openButton.isEnabled = true
             return
         }
+        ProcessWatchdog.prepareForSelfUpdate(expectVersion: manifest.version)
         // Do not gate on canOpenURL — false negatives are common (Kumone).
         UIApplication.shared.open(url, options: [:]) { [weak self] ok in
             DispatchQueue.main.async {
                 self?.openButton.isEnabled = true
                 if ok {
-                    self?.statusLabel.text = "已跳转巨魔。请在巨魔中点「安装」，完成后回到本应用。"
-                    AppRunLog.shared.append("打开巨魔安装 \(self?.manifest.version ?? "")")
+                    self?.statusLabel.text = "已跳转巨魔。点「安装」后将尝试自动重新打开；若没有请点桌面图标。"
+                    AppRunLog.shared.append("打开巨魔安装 \(self?.manifest.version ?? "")（已武装自动拉起）")
                 } else {
                     self?.statusLabel.text =
                         "无法打开巨魔。请打开 TrollStore → 设置 → 打开 URL Scheme，再点本页按钮。"
