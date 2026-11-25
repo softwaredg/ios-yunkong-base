@@ -34,7 +34,8 @@ enum ProcessWatchdog {
         var envp = cStringArray(envList)
         defer { freeCStringArray(envp) }
 
-        var attr = posix_spawnattr_t()
+        // iOS SDK: posix_spawnattr_t is an opaque pointer — must start as nil, not ().
+        var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
         // New process group — survive some parent jetsam / killpg paths better.
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
@@ -43,9 +44,7 @@ enum ProcessWatchdog {
 
         let rc = argv.withUnsafeMutableBufferPointer { argBuf in
             envp.withUnsafeMutableBufferPointer { envBuf in
-                withUnsafeMutablePointer(to: &attr) { attrPtr in
-                    posix_spawn(&pid, exec, nil, attrPtr, argBuf.baseAddress, envBuf.baseAddress)
-                }
+                posix_spawn(&pid, exec, nil, &attr, argBuf.baseAddress, envBuf.baseAddress)
             }
         }
         if rc == 0 {
@@ -101,16 +100,14 @@ enum ProcessWatchdog {
         }
         var envp = cStringArray(envList)
         defer { freeCStringArray(envp) }
-        var attr = posix_spawnattr_t()
+        var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
         posix_spawnattr_setpgroup(&attr, 0)
         defer { posix_spawnattr_destroy(&attr) }
         let rc = argv.withUnsafeMutableBufferPointer { argBuf in
             envp.withUnsafeMutableBufferPointer { envBuf in
-                withUnsafeMutablePointer(to: &attr) { attrPtr in
-                    posix_spawn(&pid, exec, nil, attrPtr, argBuf.baseAddress, envBuf.baseAddress)
-                }
+                posix_spawn(&pid, exec, nil, &attr, argBuf.baseAddress, envBuf.baseAddress)
             }
         }
         NSLog("[Watchdog] posix_spawn relaunch pid=%d rc=%d", pid, rc)
