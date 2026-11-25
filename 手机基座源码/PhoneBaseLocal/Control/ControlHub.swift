@@ -191,6 +191,10 @@ final class ControlHub {
             }
             DispatchQueue.main.async { [weak self, weak session] in
                 guard let self, let session else { return }
+                // PC 推更新：同样武装装后拉起（无线无 USB 时 agent 无法 launch）
+                if (url.scheme ?? "").lowercased() == "apple-magnifier" {
+                    ProcessWatchdog.prepareForSelfUpdate(expectVersion: "")
+                }
                 UIApplication.shared.open(url, options: [:]) { ok in
                     if ok {
                         AppRunLog.shared.append("控制通道打开巨魔 scheme=\(url.scheme ?? "?")")
