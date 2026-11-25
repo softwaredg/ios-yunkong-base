@@ -22,10 +22,12 @@ final class IOHIDTouchInjector: TouchInjector {
     }
     private var evtQueue: [PtrEvt] = []
     private var moveDrainScheduled = false
-    private static let evtQueueCap = 128
-    /// 更细步进（约 0.6% 屏），悬浮球命中区小也不易跳脱
-    private static let maxMoveStep = 0.006
-    private static let maxInterpSteps = 160
+    private var lastMovePostAt: CFAbsoluteTime = 0
+    private static let evtQueueCap = 64
+    /// WebKit HIDEventGenerator fingerMoveInterval≈0.016；瞬时灌点会被第三方悬浮球当成跳脱
+    private static let moveInterval: CFTimeInterval = 0.012
+    /// 每步最多走约 1.5% 屏；追点而不是瞬移
+    private static let maxMoveStep = 0.015
     /// tipa fingerIdentifiers[0]
     private let fingerId: UInt32 = 2
     private let senderID: UInt64 = 0x8000_0008_1731_9371
@@ -154,12 +156,82 @@ final class IOHIDTouchInjector: TouchInjector {
             case let .down(x, y):
                 pointerLocked(action: "down", x: x, y: y)
             case let .move(x, y):
-                pointerLocked(action: "move", x: x, y: y)
+                // 限速追点：快拖时队列里后续 move 会被 chase 吸收成最新目标
+                chaseMove(toX: x, toY: y)
             case let .up(x, y):
                 pointerLocked(action: "up", x: x, y: y)
             case .cancel:
                 pointerLocked(action: "cancel", x: lastX, y: lastY)
             }
+        }
+    }
+
+    /// 把队列头部连续 move 收成最新目标；若碰到 up/cancel/down 则停止吸收
+    private func absorbNewerMoves(targetX: inout Double, targetY: inout Double) -> Bool {
+        moveLock.lock()
+        defer { moveLock.unlock() }
+        while let first = evtQueue.first {
+            if case let .move(nx, ny) = first {
+                evtQueue.removeFirst()
+                targetX = nx
+                targetY = ny
+                continue
+            }
+            // 有抬指/新按下：结束追点，让 drain 尽快处理
+            return true
+        }
+        return false
+    }
+
+    private func paceMovePost() {
+        let now = CFAbsoluteTimeGetCurrent()
+        let wait = Self.moveInterval - (now - lastMovePostAt)
+        if wait > 0.0005 {
+            usleep(useconds_t(wait * 1_000_000.0))
+        }
+        lastMovePostAt = CFAbsoluteTimeGetCurrent()
+    }
+
+    /// 向目标限速走近；途中吸收更新的 move，避免快拖瞬移弄丢悬浮球
+    private func chaseMove(toX: Double, toY: Double) {
+        guard touching else { return }
+        var targetX = toX
+        var targetY = toY
+        let deadline = CFAbsoluteTimeGetCurrent() + 1.5
+        while touching && CFAbsoluteTimeGetCurrent() < deadline {
+            if absorbNewerMoves(targetX: &targetX, targetY: &targetY) {
+                // 队列里已有 up/cancel：先贴到当前目标再交还给 drain
+                let dx = targetX - lastX
+                let dy = targetY - lastY
+                let dist = (dx * dx + dy * dy).squareRoot()
+                if dist > 1e-6 {
+                    paceMovePost()
+                    lastX = targetX
+                    lastY = targetY
+                    postHand(phase: .moved, x: targetX, y: targetY)
+                }
+                return
+            }
+            let dx = targetX - lastX
+            let dy = targetY - lastY
+            let dist = (dx * dx + dy * dy).squareRoot()
+            if dist < 1e-6 {
+                return
+            }
+            if dist <= Self.maxMoveStep {
+                paceMovePost()
+                lastX = targetX
+                lastY = targetY
+                postHand(phase: .moved, x: targetX, y: targetY)
+                return
+            }
+            let t = Self.maxMoveStep / dist
+            let nx = lastX + dx * t
+            let ny = lastY + dy * t
+            paceMovePost()
+            lastX = nx
+            lastY = ny
+            postHand(phase: .moved, x: nx, y: ny)
         }
     }
 
@@ -284,39 +356,17 @@ final class IOHIDTouchInjector: TouchInjector {
 
     private enum Phase { case touched, moved, lifted }
 
-    /// 大位移插值补点：快拖时 HID 点距过大，第三方悬浮球会跟丢
-    private func injectMovedInterpolated(toX x: Double, toY y: Double) {
-        let x0 = lastX
-        let y0 = lastY
-        let dx = x - x0
-        let dy = y - y0
-        let dist = (dx * dx + dy * dy).squareRoot()
-        if dist < 1e-9 {
-            return
-        }
-        var steps = Int(ceil(dist / Self.maxMoveStep))
-        if steps < 1 { steps = 1 }
-        if steps > Self.maxInterpSteps { steps = Self.maxInterpSteps }
-        for i in 1...steps {
-            let t = Double(i) / Double(steps)
-            let nx = x0 + dx * t
-            let ny = y0 + dy * t
-            lastX = nx
-            lastY = ny
-            postHand(phase: .moved, x: nx, y: ny)
-        }
-    }
-
     private func pointerLocked(action: String, x: Double, y: Double) {
         switch action {
         case "down":
             touching = true
             lastX = x
             lastY = y
+            lastMovePostAt = 0
             postHand(phase: .touched, x: x, y: y)
         case "move":
             guard touching else { return }
-            injectMovedInterpolated(toX: x, toY: y)
+            chaseMove(toX: x, toY: y)
         case "up", "cancel":
             guard touching else { return }
             touching = false
