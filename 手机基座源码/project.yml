@@ -1,4 +1,4 @@
-# PHB1 PhoneBaseLocal (from 投屏解包). Pack scripts still emit IOSYunKongBase.app.
+# PHB1 PhoneBaseLocal + PhoneBaseHelper（独立服务进程）
 name: IOSYunKongBase
 options:
   bundleIdPrefix: cn.iosmirror
@@ -13,7 +13,65 @@ settings:
     IPHONEOS_DEPLOYMENT_TARGET: "14.0"
     ENABLE_BITCODE: NO
     CLANG_ENABLE_MODULES: YES
+
 targets:
+  PhoneBaseHelper:
+    type: application
+    platform: iOS
+    sources:
+      - path: PhoneBaseHelper
+      - path: PhoneBaseLocal
+        excludes:
+          - App/**
+          - Assets.xcassets/**
+          - Info.plist
+          - "*.entitlements"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: cn.iosmirror.base.helper
+        PRODUCT_NAME: PhoneBaseHelper
+        INFOPLIST_FILE: PhoneBaseHelper/Info.plist
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""
+        DEVELOPMENT_TEAM: ""
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: "0.2.59"
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-framework"
+          - "IOKit"
+          - "-framework"
+          - "IOSurface"
+          - "-framework"
+          - "QuartzCore"
+          - "-framework"
+          - "UIKit"
+          - "-framework"
+          - "VideoToolbox"
+          - "-framework"
+          - "CoreMedia"
+          - "-framework"
+          - "CoreVideo"
+          - "-framework"
+          - "AVFoundation"
+        CLANG_ENABLE_OBJC_ARC: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+        CODE_SIGN_ENTITLEMENTS: signing/App.entitlements
+    dependencies:
+      - sdk: IOSurface.framework
+      - sdk: VideoToolbox.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
+      - sdk: CoreFoundation.framework
+      - sdk: UIKit.framework
+      - sdk: AVFoundation.framework
+
   IOSYunKongBase:
     type: application
     platform: iOS
@@ -57,6 +115,9 @@ targets:
           - "@executable_path/Frameworks"
         CODE_SIGN_ENTITLEMENTS: signing/App.entitlements
     dependencies:
+      - target: PhoneBaseHelper
+        embed: false
+        link: false
       - sdk: IOSurface.framework
       - sdk: VideoToolbox.framework
       - sdk: QuartzCore.framework
@@ -65,5 +126,19 @@ targets:
       - sdk: CoreFoundation.framework
       - sdk: UIKit.framework
       - sdk: AVFoundation.framework
+    postCompileScripts:
+      - name: Embed PhoneBaseHelper
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          HELPER_BIN="${BUILT_PRODUCTS_DIR}/PhoneBaseHelper.app/PhoneBaseHelper"
+          DEST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/PhoneBaseHelper"
+          if [[ ! -f "$HELPER_BIN" ]]; then
+            echo "error: missing helper binary: $HELPER_BIN" >&2
+            exit 1
+          fi
+          cp -f "$HELPER_BIN" "$DEST"
+          chmod +x "$DEST"
+          echo "embedded PhoneBaseHelper -> $DEST"
     scheme:
       testTargets: []

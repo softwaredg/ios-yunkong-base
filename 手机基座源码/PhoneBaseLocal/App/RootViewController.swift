@@ -1,7 +1,7 @@
 import UIKit
 
 final class RootViewController: UIViewController {
-    private let runtime: BaseRuntime
+    private let gateway: ServiceGateway
     private let scrollView = UIScrollView()
     private let contentView = UIView()
 
@@ -22,9 +22,10 @@ final class RootViewController: UIViewController {
     private let deviceStack = UIStackView()
     private var pendingManifest: TipaSelfUpdate.Manifest?
     private var didAutoCheckUpdate = false
+    private var statusPoll: Timer?
 
-    init(runtime: BaseRuntime) {
-        self.runtime = runtime
+    init(gateway: ServiceGateway) {
+        self.gateway = gateway
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -63,7 +64,7 @@ final class RootViewController: UIViewController {
         connectValue.adjustsFontSizeToFitWidth = true
         connectValue.minimumScaleFactor = 0.7
 
-        BaseChrome.applyFilled(toggleButton, title: runtime.isRunning ? "停止服务" : "启动服务")
+        BaseChrome.applyFilled(toggleButton, title: gateway.isRunning ? "停止服务" : "启动服务")
         toggleButton.addTarget(self, action: #selector(toggle), for: .touchUpInside)
 
         BaseChrome.applyAction(updateButton, title: "检查更新", color: BaseChrome.actionUpdate)
@@ -86,7 +87,7 @@ final class RootViewController: UIViewController {
         deviceStack.translatesAutoresizingMaskIntoConstraints = false
 
         buildLayout()
-        wireRuntime()
+        wireGateway()
         refreshIP()
         refreshDeviceInfo()
         refreshHero()
@@ -98,9 +99,19 @@ final class RootViewController: UIViewController {
             object: nil
         )
 
+        statusPoll = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
+            self?.gateway.refreshStatus()
+            self?.refreshHero()
+            self?.refreshDeviceInfo(light: true)
+        }
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             self?.runSelfTest(silent: true)
         }
+    }
+
+    deinit {
+        statusPoll?.invalidate()
     }
 
     @objc private func onSelfTestTap() {
@@ -217,17 +228,19 @@ final class RootViewController: UIViewController {
         ])
     }
 
-    private func wireRuntime() {
-        runtime.onStatus = { [weak self] text in
+    private func wireGateway() {
+        gateway.onStatus = { [weak self] text in
             DispatchQueue.main.async {
                 self?.statusDetail.text = text
                 self?.refreshHero()
                 self?.refreshDeviceInfo(light: true)
             }
         }
+        gateway.refreshStatus()
     }
 
     @objc private func onAppActive() {
+        gateway.refreshStatus()
         refreshIP()
         refreshDeviceInfo()
         refreshHero()
@@ -243,7 +256,7 @@ final class RootViewController: UIViewController {
     }
 
     private func refreshHero() {
-        let running = runtime.isRunning
+        let running = gateway.isRunning
         statusDot.backgroundColor = running ? BaseChrome.accent : BaseChrome.textMuted
         statusTitle.text = running ? "运行中" : "已停止"
         BaseChrome.applyFilled(
@@ -253,13 +266,13 @@ final class RootViewController: UIViewController {
             ink: running ? .white : BaseChrome.accentInk
         )
         if statusDetail.text?.isEmpty != false {
-            statusDetail.text = running ? "电脑可连接本机投屏" : "启动后，PC 端才能拉到画面"
+            statusDetail.text = running ? "电脑可连接本机投屏（Helper）" : "启动后由 Helper 提供投屏服务"
         }
     }
 
     private func refreshDeviceInfo(light: Bool = false) {
         _ = light
-        let rows = DeviceStatusInfo.rows(runtimeRunning: runtime.isRunning)
+        let rows = DeviceStatusInfo.rows(runtimeRunning: gateway.isRunning)
         deviceStack.arrangedSubviews.forEach {
             deviceStack.removeArrangedSubview($0)
             $0.removeFromSuperview()
@@ -340,18 +353,16 @@ final class RootViewController: UIViewController {
             connectValue.text = "等待 Wi‑Fi 地址…"
             connectValue.textColor = BaseChrome.textMuted
         } else {
-            connectValue.text = "\(first):\(runtime.port)"
+            connectValue.text = "\(first):\(gateway.port)"
             connectValue.textColor = BaseChrome.textPrimary
         }
     }
 
     @objc private func toggle() {
-        if runtime.isRunning {
-            AppRunLog.shared.append("用户停止服务")
-            runtime.stop()
+        if gateway.isRunning {
+            gateway.stop()
         } else {
-            AppRunLog.shared.append("用户启动服务")
-            runtime.start()
+            _ = gateway.start()
         }
         refreshIP()
         refreshDeviceInfo()
@@ -360,9 +371,10 @@ final class RootViewController: UIViewController {
 
     private func runSelfTest(silent: Bool) {
         selfTestButton.isEnabled = false
-        let port = runtime.port
+        let port = gateway.port
         let lan = LanAddress.ipv4List().first
-        let oursRunning = runtime.isRunning
+        gateway.refreshStatus()
+        let oursRunning = gateway.isRunning
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let local = Self.fetchSummary("http://127.0.0.1:\(port)/api/health")
             let lanResult: String
@@ -382,6 +394,8 @@ final class RootViewController: UIViewController {
                         : "自检发现问题，详情见运行日志"
                 }
                 self?.selfTestButton.isEnabled = true
+                self?.gateway.refreshStatus()
+                self?.refreshHero()
             }
         }
     }

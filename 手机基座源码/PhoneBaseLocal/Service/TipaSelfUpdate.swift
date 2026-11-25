@@ -1,7 +1,7 @@
 import Foundation
 import UIKit
 
-/// 手机端自检 tipa 更新：拉公开清单，比版本，跳转巨魔安装。
+/// 手机端自检 tipa 更新：拉清单 → 下载 → DocumentInteraction 交给巨魔（失败再 magnifier）。
 enum TipaSelfUpdate {
     static let manifestURL = URL(string: "https://touping.facaishu.vip/api/tipa/update")!
 
@@ -21,7 +21,6 @@ enum TipaSelfUpdate {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
     }
 
-    /// 段式数字比较，与 agent `cmpVer` 一致：a>b → 正，a<b → 负。
     static func cmpVer(_ a: String, _ b: String) -> Int {
         let pa = a.split(separator: ".").map { Int($0) ?? 0 }
         let pb = b.split(separator: ".").map { Int($0) ?? 0 }
@@ -34,7 +33,6 @@ enum TipaSelfUpdate {
     }
 
     static func trollInstallURL(tipaHttpsURL: String) -> URL? {
-        // 对齐 JS encodeURIComponent：整段 tipa https URL 作为 query 值
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "-_.!~*'()")
         let encoded = tipaHttpsURL.addingPercentEncoding(withAllowedCharacters: allowed) ?? tipaHttpsURL
@@ -55,9 +53,7 @@ enum TipaSelfUpdate {
                 DispatchQueue.main.async { completion(.failed("HTTP \(code)")) }
                 return
             }
-            guard
-                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else {
+            guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 DispatchQueue.main.async { completion(.failed("清单解析失败")) }
                 return
             }
@@ -84,17 +80,95 @@ enum TipaSelfUpdate {
         }.resume()
     }
 
+    /// 下载 tipa 到 Documents，供 DocumentInteraction 打开。
+    static func downloadTipa(manifest: Manifest, progress: ((Double) -> Void)? = nil, completion: @escaping (Result<URL, Error>) -> Void) {
+        guard let remote = URL(string: manifest.url) else {
+            completion(.failure(NSError(domain: "TipaSelfUpdate", code: 1, userInfo: [NSLocalizedDescriptionKey: "坏 URL"])))
+            return
+        }
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let dest = docs.appendingPathComponent("PhoneBase_\(manifest.version).tipa")
+        try? FileManager.default.removeItem(at: dest)
+
+        let task = URLSession.shared.downloadTask(with: remote) { tmp, resp, err in
+            if let err {
+                DispatchQueue.main.async { completion(.failure(err)) }
+                return
+            }
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            guard code == 200, let tmp else {
+                DispatchQueue.main.async {
+                    completion(.failure(NSError(domain: "TipaSelfUpdate", code: code, userInfo: [NSLocalizedDescriptionKey: "下载失败 HTTP \(code)"])))
+                }
+                return
+            }
+            do {
+                if FileManager.default.fileExists(atPath: dest.path) {
+                    try FileManager.default.removeItem(at: dest)
+                }
+                try FileManager.default.moveItem(at: tmp, to: dest)
+                DispatchQueue.main.async { completion(.success(dest)) }
+            } catch {
+                DispatchQueue.main.async { completion(.failure(error)) }
+            }
+        }
+        task.resume()
+    }
+
+    /// 启动时：若有装后标记，清掉并记日志（Helper 负责拉起；此处确认版本）。
+    static func resumeInstalledUpdateIfNeeded() {
+        guard UpdateMarker.exists else { return }
+        let expect = UpdateMarker.readVersion() ?? "?"
+        let local = localVersion
+        if cmpVer(local, expect) >= 0 {
+            AppRunLog.shared.append("装后续上完成 local=\(local) expect=\(expect)")
+            UpdateMarker.clear()
+        } else {
+            AppRunLog.shared.append("装后续上：本机 \(local) 仍低于 \(expect)，保留标记")
+        }
+    }
+
+    /// 兼容旧调用：直接 magnifier（无下载）。
     @discardableResult
     static func openInstall(manifest: Manifest, completion: ((Bool) -> Void)? = nil) -> Bool {
+        HelperLauncher.armPostUpdate(expectVersion: manifest.version)
         guard let u = trollInstallURL(tipaHttpsURL: manifest.url) else {
             completion?(false)
             return false
         }
-        // 巨魔装完不会自己回跳；武装看门狗在覆盖杀进程后延迟拉起
-        ProcessWatchdog.prepareForSelfUpdate(expectVersion: manifest.version)
         UIApplication.shared.open(u, options: [:]) { ok in
             DispatchQueue.main.async { completion?(ok) }
         }
         return true
+    }
+}
+
+/// 持有 DocumentInteraction，避免早释放。
+final class TipaDocumentHandoff: NSObject, UIDocumentInteractionControllerDelegate {
+    static let shared = TipaDocumentHandoff()
+    private var doc: UIDocumentInteractionController?
+    private weak var presenter: UIViewController?
+
+    func present(fileURL: URL, from vc: UIViewController, anchor: UIView) -> Bool {
+        presenter = vc
+        let c = UIDocumentInteractionController(url: fileURL)
+        c.delegate = self
+        // 不强制 UTI，便于系统列出巨魔（.tipa / .ipa）
+        doc = c
+        let ok = c.presentOpenInMenu(from: anchor.bounds, in: anchor, animated: true)
+        if !ok {
+            // 再试 options menu
+            return c.presentOptionsMenu(from: anchor.bounds, in: anchor, animated: true)
+        }
+        return ok
+    }
+
+    func documentInteractionControllerDidDismissOpenInMenu(_ controller: UIDocumentInteractionController) {
+        // keep doc until next handoff
+    }
+
+    func documentInteractionController(_ controller: UIDocumentInteractionController, didEndSendingToApplication application: String?) {
+        AppRunLog.shared.append("已交给应用打开 tipa：\(application ?? "?")")
     }
 }

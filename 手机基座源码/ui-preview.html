@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>本地基座 · UI 预览</title>
+  <style>
+    :root {
+      --bg: #0f1214;
+      --surface: #1c1f24;
+      --raised: #24272c;
+      --hair: rgba(255,255,255,.08);
+      --text: #f5f5f5;
+      --sec: #9e9e9e;
+      --muted: #6b6b6b;
+      --accent: #38c794;
+      --accent-ink: #0a241a;
+      --warn: #eb9e38;
+      --danger: #db5247;
+      --btn-update: #447ae6;
+      --btn-log: #667593;
+      --btn-test: #299ea3;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      gap: 24px;
+      padding: 32px 16px;
+      background: #1a1a1c;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      color: var(--text);
+    }
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .toolbar button {
+      border: 1px solid var(--hair);
+      background: var(--raised);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font: 600 14px/1 inherit;
+      cursor: pointer;
+    }
+    .toolbar button.on { outline: 2px solid var(--accent); }
+    .hint {
+      color: var(--sec);
+      font-size: 13px;
+      text-align: center;
+      max-width: 360px;
+    }
+    .phone {
+      width: 390px;
+      height: 844px;
+      border-radius: 44px;
+      background: #000;
+      padding: 12px;
+      box-shadow: 0 30px 80px rgba(0,0,0,.55);
+      position: relative;
+    }
+    .screen {
+      height: 100%;
+      border-radius: 36px;
+      background: var(--bg);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+    .notch {
+      height: 34px;
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      padding: 0 28px 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+      flex: none;
+    }
+    .scroll {
+      flex: 1;
+      overflow: auto;
+      padding: 10px 20px 32px;
+      scrollbar-width: thin;
+    }
+    .brand { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; }
+    .version { margin-top: 4px; font-size: 13px; color: var(--muted); }
+    .card {
+      margin-top: 20px;
+      background: var(--surface);
+      border: 1px solid var(--hair);
+      border-radius: 14px;
+      padding: 18px;
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+    }
+    .card.hero {
+      text-align: center;
+    }
+    .card.hero .status-detail,
+    .card.hero .connect-cap,
+    .card.hero .connect-val {
+      text-align: center;
+    }
+    .dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--muted);
+    }
+    .dot.on { background: var(--accent); box-shadow: 0 0 0 4px rgba(56,199,148,.15); }
+    .status-title { font-size: 22px; font-weight: 600; }
+    .status-detail { margin-top: 8px; font-size: 14px; color: var(--sec); line-height: 1.4; }
+    .connect-cap {
+      margin-top: 16px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+    .connect-val {
+      margin-top: 4px;
+      font: 500 20px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .connect-val.muted { color: var(--muted); }
+    .btn {
+      display: grid;
+      place-items: center;
+      min-height: 50px;
+      border-radius: 12px;
+      border: none;
+      font: 600 17px/1 inherit;
+      cursor: default;
+      width: 100%;
+    }
+    .btn.primary {
+      margin-top: 20px;
+      background: var(--accent);
+      color: var(--accent-ink);
+    }
+    .btn.danger {
+      margin-top: 20px;
+      background: var(--danger);
+      color: #fff;
+    }
+    .actions-grid {
+      margin-top: 20px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .actions-grid .btn {
+      min-height: 48px;
+      margin-top: 0;
+      font-size: 15px;
+      color: #fff;
+      border: none;
+    }
+    .actions-grid .btn.primary { color: var(--accent-ink); }
+    .btn.update { background: var(--btn-update); }
+    .btn.log { background: var(--btn-log); }
+    .btn.test { background: var(--btn-test); }
+    .btn.warn-fill {
+      background: var(--warn);
+      color: #2e1a05;
+      border: none;
+    }
+    .update-hint {
+      margin-top: 14px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.45;
+      text-align: center;
+    }
+    .card.hero .update-hint {
+      margin-top: 14px;
+    }
+    .tools {
+      margin-top: 8px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      align-items: center;
+    }
+    .btn.plain {
+      min-height: 44px;
+      background: transparent;
+      color: var(--warn);
+      font-size: 15px;
+      font-weight: 500;
+    }
+    .sec-label {
+      margin-top: 24px;
+      margin-bottom: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+    .kv {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 2px 0;
+      font-size: 14px;
+    }
+    .kv .k { color: var(--sec); flex: none; }
+    .kv .v {
+      color: var(--text);
+      text-align: right;
+      font: 400 13px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      word-break: break-all;
+    }
+    .sep { height: 1px; background: var(--hair); margin: 10px 0; }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--raised);
+      color: var(--text);
+    }
+    .status-pill.on {
+      background: rgba(56,199,148,.92);
+      color: var(--accent-ink);
+    }
+    .meter {
+      display: grid;
+      gap: 8px;
+    }
+    .meter-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      font-size: 14px;
+    }
+    .meter-head .k { color: var(--sec); }
+    .meter-head .pct {
+      font: 600 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-variant-numeric: tabular-nums;
+    }
+    .meter-track {
+      height: 6px;
+      border-radius: 3px;
+      background: rgba(255,255,255,.08);
+      overflow: hidden;
+    }
+    .meter-fill {
+      height: 100%;
+      border-radius: 3px;
+      background: var(--accent);
+    }
+    .meter-fill.warn { background: var(--warn); }
+    .meter-fill.danger { background: var(--danger); }
+    .meter-detail {
+      font: 400 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: var(--muted);
+    }
+    .mono-card {
+      font: 400 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: var(--sec);
+      white-space: pre-wrap;
+    }
+    .home {
+      position: absolute;
+      left: 50%;
+      bottom: 8px;
+      transform: translateX(-50%);
+      width: 134px;
+      height: 5px;
+      border-radius: 3px;
+      background: rgba(255,255,255,.35);
+      z-index: 2;
+    }
+    .log-sheet {
+      display: none;
+      position: absolute;
+      inset: 0;
+      z-index: 5;
+      background: var(--bg);
+      flex-direction: column;
+      border-radius: 36px;
+      overflow: hidden;
+    }
+    .log-sheet.show { display: flex; }
+    .log-nav {
+      flex: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 48px 16px 12px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--hair);
+    }
+    .log-nav button {
+      border: none;
+      background: transparent;
+      color: var(--accent);
+      font: 600 15px/1 inherit;
+      cursor: pointer;
+      padding: 8px;
+    }
+    .log-nav .title {
+      font: 600 17px/1 inherit;
+      color: var(--text);
+    }
+    .log-nav .right { display: flex; gap: 4px; }
+    .log-body {
+      flex: 1;
+      margin: 12px 16px 28px;
+      padding: 16px 14px;
+      border-radius: 12px;
+      background: var(--surface);
+      color: var(--text);
+      font: 400 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+      overflow: auto;
+    }
+    .install-sheet {
+      display: none;
+      position: absolute;
+      inset: 0;
+      z-index: 6;
+      background: var(--bg);
+      border-radius: 36px;
+      padding: 72px 20px 40px;
+      flex-direction: column;
+      justify-content: center;
+      gap: 12px;
+    }
+    .install-sheet.show { display: flex; }
+    .install-card {
+      background: var(--surface);
+      border: 1px solid var(--hair);
+      border-radius: 14px;
+      padding: 24px 20px;
+      text-align: center;
+    }
+    .install-card h2 {
+      margin: 0 0 12px;
+      font-size: 24px;
+      font-weight: 600;
+    }
+    .install-card p {
+      margin: 0;
+      color: var(--sec);
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    .install-status {
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .install-sheet .btn { min-height: 50px; }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button type="button" class="on" data-state="running">运行中</button>
+    <button type="button" data-state="stopped">已停止</button>
+    <button type="button" data-state="update">有更新</button>
+  </div>
+  <p class="hint">这是 tipa 主屏 HTML 预览（未打包）。可点「运行日志」打开日志页。</p>
+
+  <div class="phone">
+    <div class="screen">
+      <div class="notch"><span>9:41</span><span>●●● Wi‑Fi</span></div>
+      <div class="scroll" id="root"></div>
+      <div class="log-sheet" id="logSheet" aria-hidden="true">
+        <div class="log-nav">
+          <button type="button" id="logClose">关闭</button>
+          <div class="title">运行日志</div>
+          <div class="right">
+            <button type="button" id="logCopy">复制</button>
+            <button type="button" id="logClear">清空</button>
+          </div>
+        </div>
+        <div class="log-body" id="logBody"></div>
+      </div>
+      <div class="install-sheet" id="installSheet" aria-hidden="true">
+        <div class="install-card">
+          <h2>安装基座 0.2.50</h2>
+          <p>将打开巨魔（TrollStore）安装最新 tipa。<br>在巨魔里点「安装」，装完再回到本应用。</p>
+          <div class="install-status" id="installStatus">准备打开巨魔…</div>
+        </div>
+        <button class="btn warn-fill" type="button" id="installOpen">打开巨魔安装</button>
+        <button class="btn log" type="button" id="installLater">稍后</button>
+      </div>
+      <div class="home"></div>
+    </div>
+  </div>
+
+  <script>
+    const logLines = [
+      "[2026-11-22 19:10:01] ========== 本地基座运行日志 ==========",
+      "[2026-11-22 19:10:01] 应用启动 · 版本 0.2.49 · cn.iosmirror.base",
+      "[2026-11-22 19:10:02] 用户启动服务",
+      "[2026-11-22 19:10:03] 自检",
+      "           127.0.0.1 → HTTP 200 lan-phonebase accept=-",
+      "           LAN → HTTP 200 lan-phonebase accept=-",
+      "[2026-11-22 19:10:04] 已是最新 local=0.2.49 remote=0.2.49",
+    ];
+
+    const states = {
+      running: {
+        running: true,
+        detail: "电脑可连接本机投屏",
+        ip: "192.168.1.23:11019",
+        updateTitle: "检查更新",
+        updateClass: "bordered",
+        updateHint: "已是最新 · 本机 0.2.49 · 线上 0.2.49",
+      },
+      stopped: {
+        running: false,
+        detail: "启动后，PC 端才能拉到画面",
+        ip: "192.168.1.23:11019",
+        updateTitle: "检查更新",
+        updateClass: "bordered",
+        updateHint: "当前版本 0.2.49",
+      },
+      update: {
+        running: true,
+        detail: "电脑可连接本机投屏",
+        ip: "192.168.1.23:11019",
+        updateTitle: "去安装 0.2.50",
+        updateClass: "warn-fill",
+        updateHint: "有新版 0.2.50（本机 0.2.49）\\n点上方按钮用巨魔安装",
+      },
+    };
+
+    function meterTone(p) {
+      if (p >= 90) return "danger";
+      if (p >= 75) return "warn";
+      return "";
+    }
+
+    function deviceBlock(running) {
+      const status = running ? "运行正常" : "服务已停止";
+      const storagePct = 38;
+      const memoryPct = 72;
+      const parts = [
+        `<div class="kv"><span class="k">运行状态</span><span class="status-pill ${running ? "on" : ""}">${status}</span></div>`,
+        `<div class="kv"><span class="k">系统版本</span><span class="v">iOS 16.7.10</span></div>`,
+        `<div class="kv"><span class="k">设备型号</span><span class="v">iPhone 13 (iPhone14,5)</span></div>`,
+        `<div class="kv"><span class="k">序列号</span><span class="v">F2LDN······</span></div>`,
+        `<div class="kv"><span class="k">屏幕分辨率</span><span class="v">1170 × 2532 (3x)</span></div>`,
+        `<div class="meter">
+          <div class="meter-head"><span class="k">存储</span><span class="pct">${storagePct}%</span></div>
+          <div class="meter-track"><div class="meter-fill ${meterTone(storagePct)}" style="width:${storagePct}%"></div></div>
+          <div class="meter-detail">已用 48.2 / 128 GB</div>
+        </div>`,
+        `<div class="meter">
+          <div class="meter-head"><span class="k">内存</span><span class="pct">${memoryPct}%</span></div>
+          <div class="meter-track"><div class="meter-fill ${meterTone(memoryPct)}" style="width:${memoryPct}%"></div></div>
+          <div class="meter-detail">已用 2.9 / 4 GB</div>
+        </div>`,
+        `<div class="kv"><span class="k">应用包名</span><span class="v">cn.iosmirror.base</span></div>`,
+      ];
+      return parts.join('<div class="sep"></div>');
+    }
+
+    function render(key) {
+      const s = states[key];
+      const primary = s.running ? "btn danger" : "btn primary";
+      const primaryLabel = s.running ? "停止服务" : "启动服务";
+
+      document.getElementById("root").innerHTML = `
+        <div class="card hero">
+          <div class="status-row">
+            <div class="dot ${s.running ? "on" : ""}"></div>
+            <div class="status-title">${s.running ? "运行中" : "已停止"}</div>
+          </div>
+          <div class="status-detail">${s.detail}</div>
+          <div class="connect-cap">电脑添加地址</div>
+          <div class="connect-val">${s.ip}</div>
+          <div class="update-hint">${s.updateHint.replace(/\\n/g, "<br>")}</div>
+        </div>
+
+        <div class="actions-grid">
+          <button class="${primary}" type="button">${primaryLabel}</button>
+          <button class="btn ${s.updateClass === "warn-fill" ? "warn-fill" : "update"}" type="button">${s.updateTitle}</button>
+          <button class="btn log" type="button">运行日志</button>
+          <button class="btn test" type="button">本机自检</button>
+        </div>
+
+        <div class="sec-label">设备</div>
+        <div class="card" style="margin-top:0;padding:14px 16px">${deviceBlock(s.running)}</div>
+      `;
+
+      const root = document.getElementById("root");
+      root.querySelector(".btn.log")?.addEventListener("click", openLog);
+      root.querySelector(".btn.warn-fill, .btn.update")?.addEventListener("click", (e) => {
+        const btn = e.currentTarget;
+        if (btn.classList.contains("warn-fill") || (btn.textContent || "").includes("去安装")) {
+          openInstall();
+          return;
+        }
+        // 检查更新：切到有更新态演示
+        document.querySelectorAll(".toolbar button").forEach((x) => x.classList.remove("on"));
+        const up = document.querySelector('.toolbar button[data-state="update"]');
+        up?.classList.add("on");
+        render("update");
+      });
+      root.querySelector(".btn.test")?.addEventListener("click", () => {
+        const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
+        logLines.push(`[${stamp}] 自检`);
+        logLines.push("           127.0.0.1 → HTTP 200 lan-phonebase accept=-");
+        logLines.push("           LAN → HTTP 200 lan-phonebase accept=-");
+        alert("自检完成，详情见运行日志");
+      });
+    }
+
+    function openInstall() {
+      const sheet = document.getElementById("installSheet");
+      const status = document.getElementById("installStatus");
+      status.textContent = "正在打开巨魔…";
+      sheet.classList.add("show");
+      sheet.setAttribute("aria-hidden", "false");
+      window.setTimeout(() => {
+        status.textContent = "已跳转巨魔（预览模拟）。请在巨魔中点「安装」，完成后回到本应用。";
+        const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
+        logLines.push(`[${stamp}] 打开巨魔安装 0.2.50`);
+      }, 600);
+    }
+
+    function closeInstall() {
+      const sheet = document.getElementById("installSheet");
+      sheet.classList.remove("show");
+      sheet.setAttribute("aria-hidden", "true");
+    }
+
+    function openLog() {
+      const sheet = document.getElementById("logSheet");
+      const body = document.getElementById("logBody");
+      body.textContent = logLines.join("\n") || "暂无日志";
+      sheet.classList.add("show");
+      sheet.setAttribute("aria-hidden", "false");
+      body.scrollTop = body.scrollHeight;
+    }
+
+    function closeLog() {
+      const sheet = document.getElementById("logSheet");
+      sheet.classList.remove("show");
+      sheet.setAttribute("aria-hidden", "true");
+    }
+
+    document.getElementById("logClose").addEventListener("click", closeLog);
+    document.getElementById("installLater").addEventListener("click", closeInstall);
+    document.getElementById("installOpen").addEventListener("click", () => {
+      document.getElementById("installStatus").textContent =
+        "已跳转巨魔（预览模拟）。请在巨魔中点「安装」，完成后回到本应用。";
+    });
+    document.getElementById("logClear").addEventListener("click", () => {
+      logLines.length = 0;
+      logLines.push(`[${new Date().toISOString().slice(0, 19).replace("T", " ")}] 日志已清空`);
+      document.getElementById("logBody").textContent = logLines.join("\n");
+    });
+    document.getElementById("logCopy").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(logLines.join("\n"));
+      } catch {
+        /* ignore */
+      }
+    });
+
+    document.querySelectorAll(".toolbar button").forEach((b) => {
+      b.addEventListener("click", () => {
+        document.querySelectorAll(".toolbar button").forEach((x) => x.classList.remove("on"));
+        b.classList.add("on");
+        closeLog();
+        closeInstall();
+        render(b.dataset.state);
+      });
+    });
+    render("running");
+  </script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 import UIKit
 
-/// 点击「去安装」后先展示引导页，再跳转巨魔，避免 open URL 无反馈。
+/// 下载 tipa → DocumentInteraction 交给巨魔；失败再 magnifier URL。
 final class TipaInstallGuideViewController: UIViewController {
     private let manifest: TipaSelfUpdate.Manifest
     private let titleLabel = UILabel()
@@ -8,7 +8,8 @@ final class TipaInstallGuideViewController: UIViewController {
     private let statusLabel = UILabel()
     private let openButton = UIButton(type: .system)
     private let closeButton = UIButton(type: .system)
-    private var didAutoOpen = false
+    private var didAutoStart = false
+    private var localTipaURL: URL?
 
     init(manifest: TipaSelfUpdate.Manifest) {
         self.manifest = manifest
@@ -28,21 +29,21 @@ final class TipaInstallGuideViewController: UIViewController {
         titleLabel.textAlignment = .center
 
         detailLabel.text = manifest.notes.isEmpty
-            ? "点下方按钮打开巨魔（TrollStore）安装。\n装完后会尝试自动重新打开本应用；若未打开请点桌面图标。\n若跳到「放大镜」：巨魔设置里打开 URL Scheme。"
-            : "\(manifest.notes)\n\n点下方打开巨魔安装。装完后会尝试自动打开；未打开请点桌面图标。\n若跳到「放大镜」：巨魔设置里打开 URL Scheme。"
+            ? "将下载更新包并用巨魔（TrollStore）安装。\n装完后 Helper 会尝试自动打开本应用；若没有请点桌面图标。"
+            : "\(manifest.notes)\n\n下载后交给巨魔安装。装完会尝试自动打开。"
         detailLabel.font = .systemFont(ofSize: 15, weight: .regular)
         detailLabel.textColor = BaseChrome.textSecondary
         detailLabel.textAlignment = .center
         detailLabel.numberOfLines = 0
 
-        statusLabel.text = "请点「打开巨魔安装」"
+        statusLabel.text = "准备下载…"
         statusLabel.font = .systemFont(ofSize: 13, weight: .regular)
         statusLabel.textColor = BaseChrome.textMuted
         statusLabel.textAlignment = .center
         statusLabel.numberOfLines = 0
 
-        BaseChrome.applyFilled(openButton, title: "打开巨魔安装", color: BaseChrome.warn, ink: UIColor(red: 0.18, green: 0.10, blue: 0.02, alpha: 1))
-        openButton.addTarget(self, action: #selector(openTroll), for: .touchUpInside)
+        BaseChrome.applyFilled(openButton, title: "下载并安装", color: BaseChrome.warn, ink: UIColor(red: 0.18, green: 0.10, blue: 0.02, alpha: 1))
+        openButton.addTarget(self, action: #selector(startInstall), for: .touchUpInside)
 
         BaseChrome.applyBordered(closeButton, title: "稍后")
         closeButton.addTarget(self, action: #selector(close), for: .touchUpInside)
@@ -80,35 +81,61 @@ final class TipaInstallGuideViewController: UIViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // Best-effort auto open (Kumone/Dopamine-style). Primary path is the button tap.
-        if !didAutoOpen {
-            didAutoOpen = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-                self?.openTroll()
+        if !didAutoStart {
+            didAutoStart = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                self?.startInstall()
             }
         }
     }
 
-    @objc private func openTroll() {
-        statusLabel.text = "正在打开巨魔…"
+    @objc private func startInstall() {
         openButton.isEnabled = false
+        statusLabel.text = "正在武装 Helper 并下载 \(manifest.version)…"
+        HelperLauncher.armPostUpdate(expectVersion: manifest.version)
+
+        TipaSelfUpdate.downloadTipa(manifest: manifest) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(fileURL):
+                self.localTipaURL = fileURL
+                self.statusLabel.text = "下载完成，正在打开巨魔…"
+                AppRunLog.shared.append("已下载 tipa \(self.manifest.version)")
+                let handed = TipaDocumentHandoff.shared.present(
+                    fileURL: fileURL,
+                    from: self,
+                    anchor: self.openButton
+                )
+                if handed {
+                    self.statusLabel.text = "请在菜单中选择「巨魔 / TrollStore」安装。装完后会尝试自动打开。"
+                    self.openButton.isEnabled = true
+                    BaseChrome.applyFilled(self.openButton, title: "再次打开", color: BaseChrome.warn, ink: UIColor(red: 0.18, green: 0.10, blue: 0.02, alpha: 1))
+                } else {
+                    self.fallbackMagnifier()
+                }
+            case let .failure(err):
+                AppRunLog.shared.append("下载 tipa 失败：\(err.localizedDescription)")
+                self.statusLabel.text = "下载失败，改用链接安装…"
+                self.fallbackMagnifier()
+            }
+        }
+    }
+
+    private func fallbackMagnifier() {
         guard let url = TipaSelfUpdate.trollInstallURL(tipaHttpsURL: manifest.url) else {
             statusLabel.text = "安装链接无效"
             openButton.isEnabled = true
             return
         }
-        ProcessWatchdog.prepareForSelfUpdate(expectVersion: manifest.version)
-        // Do not gate on canOpenURL — false negatives are common (Kumone).
         UIApplication.shared.open(url, options: [:]) { [weak self] ok in
             DispatchQueue.main.async {
                 self?.openButton.isEnabled = true
                 if ok {
-                    self?.statusLabel.text = "已跳转巨魔。点「安装」后将尝试自动重新打开；若没有请点桌面图标。"
-                    AppRunLog.shared.append("打开巨魔安装 \(self?.manifest.version ?? "")（已武装自动拉起）")
+                    self?.statusLabel.text = "已跳转巨魔。点「安装」后将尝试自动打开；若没有请点桌面图标。"
+                    AppRunLog.shared.append("打开巨魔 scheme \(self?.manifest.version ?? "")")
                 } else {
-                    self?.statusLabel.text =
-                        "无法打开巨魔。请打开 TrollStore → 设置 → 打开 URL Scheme，再点本页按钮。"
-                    AppRunLog.shared.append("打开巨魔失败 \(self?.manifest.version ?? "")")
+                    self?.statusLabel.text = "无法打开巨魔。请打开 TrollStore → 设置 → URL Scheme。"
+                    AppRunLog.shared.append("打开巨魔失败")
                 }
             }
         }

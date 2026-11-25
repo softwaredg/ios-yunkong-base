@@ -12,15 +12,35 @@ enum PortOccupancy {
         var portFree: Bool = false
     }
 
+    struct NamedPid {
+        var pid: pid_t
+        var name: String
+    }
+
+    /// 供 HelperLauncher 枚举进程名。
+    static func listProcessNames() -> [NamedPid] {
+        listProcesses().map { NamedPid(pid: $0.pid, name: $0.name) }
+    }
+
     /// TrollStore 覆盖安装 tipa 后旧进程常仍占端口：启动前结束其它本产品/旧基座实例。
     @discardableResult
     static func retireOtherLocals() -> Result {
         var out = Result()
         let selfPid = getpid()
+        let parentPid = ProcessRole.parentPid
         out.notes.append("selfPid=\(selfPid)")
         for round in 1...4 {
-            let siblings = listProcesses().filter {
-                $0.pid != selfPid && $0.pid > 1 && (isLocalBase($0.name) || isConflict($0.name))
+            let siblings = listProcesses().filter { p in
+                guard p.pid != selfPid && p.pid > 1 else { return false }
+                // Helper 绝不能杀掉拉起自己的主 UI
+                if ProcessRole.isHelper, parentPid > 1, p.pid == parentPid { return false }
+                if ProcessRole.isHelper {
+                    // Helper 只清其它 helper / 旧占端口的本产品僵尸，不杀主 UI 名（除非不是 parent）
+                    if isHelperBinary(p.name) { return true }
+                    if isLocalBase(p.name), p.pid != parentPid { return true }
+                    return false
+                }
+                return isLocalBase(p.name) || isHelperBinary(p.name) || isConflict(p.name)
             }
             if round == 1 {
                 out.seen = siblings.map { "\($0.name)(\($0.pid))" }
@@ -130,9 +150,14 @@ enum PortOccupancy {
         return false
     }
 
+    private static func isHelperBinary(_ name: String) -> Bool {
+        name.lowercased().hasPrefix("phonebasehelper")
+    }
+
     private static func isConflict(_ name: String) -> Bool {
         let lower = name.lowercased()
         if isLocalBase(name) { return true }
+        if isHelperBinary(name) { return true }
         if lower.hasPrefix("phonebasedirect") { return true }
         if lower.hasPrefix("directphone") { return true }
         // 仅 Direct 助手族，避免误伤其它 Direct* 进程
@@ -146,6 +171,7 @@ enum PortOccupancy {
         if lower.hasPrefix("trollvncserver") { return true }
         // 历史包名碎片（p_comm 可能截断）
         if lower.contains("yunkong") { return true }
+        // phonebasehelper 已在 isHelperBinary；其它 phonebase* 仍算冲突
         if lower.contains("phonebase") { return true }
         return false
     }

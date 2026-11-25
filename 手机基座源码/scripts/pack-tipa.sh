@@ -72,10 +72,18 @@ grep -E 'global-capture|no-sandbox' "$ENT_XML" || {
   exit 1
 }
 BIN="$APP_IN_STAGE/${APP_NAME}"
+HELPER_BIN="$APP_IN_STAGE/PhoneBaseHelper"
 # Prefer codesign adhoc — reliable on GHA macOS; brew ldid 2.1.5 was embedding <dict/>.
 if command -v codesign >/dev/null 2>&1; then
   codesign --force --sign - --entitlements "$ENT_XML" --generate-entitlement-der "$BIN"
-  echo "codesign adhoc done"
+  echo "codesign adhoc done (main)"
+  if [[ -f "$HELPER_BIN" ]]; then
+    codesign --force --sign - --entitlements "$ENT_XML" --generate-entitlement-der "$HELPER_BIN"
+    echo "codesign adhoc done (PhoneBaseHelper)"
+  else
+    echo "error: missing embedded PhoneBaseHelper at $HELPER_BIN" >&2
+    exit 1
+  fi
 else
   echo "error: codesign not found" >&2
   exit 1
@@ -92,7 +100,12 @@ if ! printf '%s' "$ENT_DUMP" | grep -q 'no-sandbox'; then
   echo "error: signed binary missing no-sandbox" >&2
   exit 1
 fi
-echo "entitlements ok"
+HELPER_ENT="$(codesign -d --entitlements :- "$HELPER_BIN" 2>/dev/null || true)"
+if ! printf '%s' "$HELPER_ENT" | grep -q 'global-capture'; then
+  echo "error: PhoneBaseHelper missing QuartzCore.global-capture" >&2
+  exit 1
+fi
+echo "entitlements ok (main + helper)"
 if [[ -d "$APP_IN_STAGE/PlugIns/Broadcast.appex" ]]; then
   rm -rf "$APP_IN_STAGE/PlugIns/Broadcast.appex/_CodeSignature" || true
   EXT_BIN="$APP_IN_STAGE/PlugIns/Broadcast.appex/Broadcast"

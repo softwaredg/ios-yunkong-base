@@ -3,56 +3,39 @@ import UIKit
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
-    private var runtime: BaseRuntime?
-    /// 看门狗/relauncher 进程持有，避免被系统过早回收
-    private var watchdogBgTask: UIBackgroundTaskIdentifier = .invalid
 
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        // watchdog / relauncher：不启投屏服务，但必须保活 runloop + 音频，否则秒挂起
-        if ProcessWatchdog.bootstrapIfNeeded() {
-            BackgroundKeepAlive.shared.start()
-            watchdogBgTask = application.beginBackgroundTask(withName: "phonebase-watchdog") { [weak self] in
-                guard let self else { return }
-                if self.watchdogBgTask != .invalid {
-                    application.endBackgroundTask(self.watchdogBgTask)
-                    self.watchdogBgTask = .invalid
-                }
-            }
-            // 零尺寸窗，避免再占一层 UI；runloop 仍要转
-            let window = UIWindow(frame: .zero)
-            window.isHidden = true
-            self.window = window
-            return true
-        }
+        TipaSelfUpdate.resumeInstalledUpdateIfNeeded()
 
-        let runtime = BaseRuntime.shared
-        self.runtime = runtime
         let window = UIWindow(frame: UIScreen.main.bounds)
-        window.rootViewController = RootViewController(runtime: runtime)
+        window.rootViewController = RootViewController(gateway: ServiceGateway.shared)
         window.makeKeyAndVisible()
         self.window = window
+
         LocalNetworkPermission.shared.requestIfNeeded()
         BackgroundKeepAlive.shared.start()
-        runtime.start()
-        runtime.setStreamingActive(true)
+
+        // 主 UI 不绑 11019；拉起独立 Helper 跑投屏服务
+        DispatchQueue.global(qos: .userInitiated).async {
+            ServiceGateway.shared.startIfNeededOnLaunch()
+            DispatchQueue.main.async {
+                ServiceGateway.shared.refreshStatus()
+            }
+        }
         return true
     }
 
     func applicationDidEnterBackground(_ application: UIApplication) {
         BackgroundKeepAlive.shared.start()
-        if let runtime, runtime.isRunning {
-            runtime.setStreamingActive(true)
-        }
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         BackgroundKeepAlive.shared.start()
-        if let runtime, runtime.isRunning {
-            runtime.setStreamingActive(true)
-        }
+        // 只刷新状态；若用户已停止服务，不要自动再拉 Helper
+        ServiceGateway.shared.refreshStatus()
     }
 
     func application(
@@ -62,12 +45,8 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     ) -> Bool {
         guard url.scheme?.lowercased() == "phonebase" else { return false }
         BackgroundKeepAlive.shared.start()
-        if let runtime {
-            if !runtime.isRunning {
-                _ = runtime.start()
-            }
-            runtime.setStreamingActive(true)
-        }
+        _ = HelperLauncher.ensureRunning()
+        ServiceGateway.shared.refreshStatus()
         return true
     }
 }

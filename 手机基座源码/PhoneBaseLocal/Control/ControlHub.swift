@@ -191,9 +191,9 @@ final class ControlHub {
             }
             DispatchQueue.main.async { [weak self, weak session] in
                 guard let self, let session else { return }
-                // PC 推更新：同样武装装后拉起（无线无 USB 时 agent 无法 launch）
+                // PC 推更新：武装 Helper 装后拉起
                 if (url.scheme ?? "").lowercased() == "apple-magnifier" {
-                    ProcessWatchdog.prepareForSelfUpdate(expectVersion: "")
+                    HelperLauncher.armPostUpdate(expectVersion: "")
                 }
                 UIApplication.shared.open(url, options: [:]) { ok in
                     if ok {
