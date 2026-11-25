@@ -1,45 +1,74 @@
 import Foundation
 import Darwin
 
-/// 旁路 watchdog：主进程崩了 / 被巨魔覆盖杀掉后，尽量再拉起本 App。
-/// 独立进程组，降低与主进程一同被 jetsam / killpg 清掉的概率。
-/// 巨魔自更新：安装前 `prepareForSelfUpdate` 写标记；父进程死后延迟 + 长窗口重试 open。
+/// 旁路 watchdog：主进程崩了 / jetsam / 巨魔覆盖后，尽量再拉起本 App。
+///
+/// 关键约束：
+/// - 守护循环必须在**后台队列**跑，主线程要留给 UIApplication + 音频保活，否则子进程秒挂起。
+/// - `exit(0)` 前再 spawn 一次性 relauncher，不依赖长驻看门狗是否还活着。
 enum ProcessWatchdog {
     private static let roleKey = "PHONEBASE_ROLE"
     private static let parentKey = "PHONEBASE_PARENT_PID"
     private static let postUpdateKey = "PHONEBASE_POST_UPDATE"
     private static let expectVerKey = "PHONEBASE_EXPECT_VER"
+    private static let delayMsKey = "PHONEBASE_DELAY_MS"
 
-    /// 崩溃恢复：短等后有限次重试
     private static let crashInitialDelayUs: useconds_t = 2_000_000
-    private static let crashRetryUs: useconds_t = 1_500_000
-    private static let crashAttempts = 4
+    private static let crashRetryUs: useconds_t = 2_000_000
+    /// jetsam 后 SpringBoard 可能短暂拒开，拉长窗口
+    private static let crashWindowSec: TimeInterval = 45
 
-    /// 自更新：先等巨魔写完再拉，窗口对齐 PC agent tipa relaunch（~90s）
     private static let updateInitialDelayUs: useconds_t = 5_000_000
     private static let updateRetryUs: useconds_t = 2_500_000
     private static let updateWindowSec: TimeInterval = 90
 
-    /// 若自身是 watchdog 则进入守护循环且永不返回；否则拉起守护子进程。
+    /// - Returns: `true` = 本进程是 watchdog/relauncher（主进程勿启服务，但须保活 runloop）
     @discardableResult
     static func bootstrapIfNeeded() -> Bool {
         let env = ProcessInfo.processInfo.environment
-        if env[roleKey] == "watchdog" {
+        let role = env[roleKey] ?? ""
+
+        if role == "relauncher" {
+            let delayMs = UInt32(env[delayMsKey] ?? "") ?? 2000
+            DispatchQueue.global(qos: .userInitiated).async {
+                runRelauncher(delayMs: delayMs)
+            }
+            return true
+        }
+
+        if role == "watchdog" {
             let parent = Int32(env[parentKey] ?? "") ?? 0
             let postUpdate = (env[postUpdateKey] == "1") || markerExists()
             let expect = env[expectVerKey] ?? readMarkerVersion() ?? ""
-            runWatchdog(parentPid: parent, postUpdate: postUpdate, expectVersion: expect)
+            // 绝不能在主线程 usleep：否则无音频保活、立刻被挂起，父进程死后无人拉起
+            DispatchQueue.global(qos: .userInitiated).async {
+                runWatchdog(parentPid: parent, postUpdate: postUpdate, expectVersion: expect)
+            }
+            return true
         }
-        spawnWatchdog(postUpdate: false, expectVersion: "")
+
+        spawnChild(role: "watchdog", postUpdate: false, expectVersion: "", parentPid: getpid())
         return false
     }
 
-    /// 跳转巨魔安装前调用：写标记并（再）拉起带 post-update 的 watchdog。
+    /// 跳转巨魔安装前：写标记并拉起 post-update watchdog。
     static func prepareForSelfUpdate(expectVersion: String) {
         writeMarker(expectVersion: expectVersion)
-        spawnWatchdog(postUpdate: true, expectVersion: expectVersion)
+        spawnChild(role: "watchdog", postUpdate: true, expectVersion: expectVersion, parentPid: getpid())
         NSLog("[Watchdog] armed post-update expect=%@", expectVersion)
         AppRunLog.shared.append("已武装装后自动拉起 expect=\(expectVersion)")
+    }
+
+    /// 主动 `exit` 前调用：spawn 短命 relauncher，不依赖长驻看门狗。
+    static func spawnDeferredRelaunch(delayMs: UInt32 = 1500) {
+        spawnChild(
+            role: "relauncher",
+            postUpdate: false,
+            expectVersion: "",
+            parentPid: 0,
+            delayMs: delayMs
+        )
+        NSLog("[Watchdog] spawned deferred relauncher delayMs=%u", delayMs)
     }
 
     private static func markerURL() -> URL {
@@ -59,7 +88,8 @@ enum ProcessWatchdog {
 
     private static func readMarkerVersion() -> String? {
         guard let text = try? String(contentsOf: markerURL(), encoding: .utf8) else { return nil }
-        let v = text.split(separator: "\n").first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let v = text.split(separator: "\n").first.map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         return (v?.isEmpty == false) ? v : nil
     }
 
@@ -67,30 +97,40 @@ enum ProcessWatchdog {
         try? FileManager.default.removeItem(at: markerURL())
     }
 
-    private static func spawnWatchdog(postUpdate: Bool, expectVersion: String) {
+    private static func spawnChild(
+        role: String,
+        postUpdate: Bool,
+        expectVersion: String,
+        parentPid: pid_t,
+        delayMs: UInt32 = 0
+    ) {
         guard let exec = Bundle.main.executablePath else { return }
         var pid: pid_t = 0
-        let parent = String(getpid())
         var argv = cStringArray([exec])
         defer { freeCStringArray(argv) }
         var envList: [String] = []
         for (k, v) in ProcessInfo.processInfo.environment
-            where k != roleKey && k != parentKey && k != postUpdateKey && k != expectVerKey
+            where k != roleKey && k != parentKey && k != postUpdateKey
+            && k != expectVerKey && k != delayMsKey
         {
             envList.append("\(k)=\(v)")
         }
-        envList.append("\(roleKey)=watchdog")
-        envList.append("\(parentKey)=\(parent)")
+        envList.append("\(roleKey)=\(role)")
+        if parentPid > 0 {
+            envList.append("\(parentKey)=\(parentPid)")
+        }
         if postUpdate {
             envList.append("\(postUpdateKey)=1")
             if !expectVersion.isEmpty {
                 envList.append("\(expectVerKey)=\(expectVersion)")
             }
         }
+        if delayMs > 0 {
+            envList.append("\(delayMsKey)=\(delayMs)")
+        }
         var envp = cStringArray(envList)
         defer { freeCStringArray(envp) }
 
-        // iOS SDK: posix_spawnattr_t is an opaque pointer — must start as nil, not ().
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP))
@@ -103,13 +143,23 @@ enum ProcessWatchdog {
             }
         }
         if rc == 0 {
-            NSLog(
-                "[Watchdog] spawned pid=%d parent=%@ postUpdate=%d",
-                pid, parent, postUpdate ? 1 : 0
-            )
+            NSLog("[Watchdog] spawned role=%@ pid=%d parent=%d", role, pid, parentPid)
         } else {
-            NSLog("[Watchdog] spawn failed rc=%d", rc)
+            NSLog("[Watchdog] spawn role=%@ failed rc=%d", role, rc)
         }
+    }
+
+    private static func runRelauncher(delayMs: UInt32) -> Never {
+        NSLog("[Watchdog] relauncher sleep %u ms", delayMs)
+        if delayMs > 0 { usleep(delayMs * 1000) }
+        let bid = Bundle.main.bundleIdentifier ?? "cn.iosmirror.base"
+        for i in 1 ... 8 {
+            openApplication(bid)
+            if i == 1 || i == 4 { relaunchViaSpawn() }
+            NSLog("[Watchdog] relauncher attempt %d", i)
+            usleep(1_500_000)
+        }
+        exit(0)
     }
 
     private static func runWatchdog(parentPid: pid_t, postUpdate: Bool, expectVersion: String) -> Never {
@@ -127,7 +177,9 @@ enum ProcessWatchdog {
             if kill(parentPid, 0) != 0 {
                 NSLog("[Watchdog] parent %d gone → relaunch (postUpdate=%d)", parentPid, armed ? 1 : 0)
                 if armed || markerExists() {
-                    relaunchAfterUpdate(expectVersion: expectVersion.isEmpty ? (readMarkerVersion() ?? "") : expectVersion)
+                    relaunchAfterUpdate(
+                        expectVersion: expectVersion.isEmpty ? (readMarkerVersion() ?? "") : expectVersion
+                    )
                 } else {
                     relaunchAfterCrash()
                 }
@@ -141,15 +193,18 @@ enum ProcessWatchdog {
     private static func relaunchAfterCrash() {
         usleep(crashInitialDelayUs)
         let bid = Bundle.main.bundleIdentifier ?? "cn.iosmirror.base"
-        for i in 0 ..< crashAttempts {
+        let deadline = Date().addingTimeInterval(crashWindowSec)
+        var n = 0
+        while Date() < deadline {
+            n += 1
             openApplication(bid)
-            relaunchViaSpawn()
-            NSLog("[Watchdog] crash relaunch attempt %d", i + 1)
+            if n == 1 || n % 3 == 0 { relaunchViaSpawn() }
+            NSLog("[Watchdog] crash relaunch attempt %d", n)
             usleep(crashRetryUs)
         }
+        openApplication(bid)
     }
 
-    /// 巨魔覆盖安装：父进程会先被杀，包可能还在写盘 —— 先等再反复 open。
     private static func relaunchAfterUpdate(expectVersion: String) {
         usleep(updateInitialDelayUs)
         let bid = Bundle.main.bundleIdentifier ?? "cn.iosmirror.base"
@@ -158,14 +213,10 @@ enum ProcessWatchdog {
         while Date() < deadline {
             n += 1
             openApplication(bid)
-            // 装到一半时 posix_spawn 旧路径可能失败；成功则新进程会顶替，无妨多试
-            if n == 1 || n % 3 == 0 {
-                relaunchViaSpawn()
-            }
+            if n == 1 || n % 3 == 0 { relaunchViaSpawn() }
             NSLog("[Watchdog] post-update relaunch attempt %d expect=%@", n, expectVersion)
             usleep(updateRetryUs)
         }
-        // 最后再 open 一次
         openApplication(bid)
         NSLog("[Watchdog] post-update window done attempts=%d", n)
     }
@@ -175,10 +226,10 @@ enum ProcessWatchdog {
         var pid: pid_t = 0
         var argv = cStringArray([exec])
         defer { freeCStringArray(argv) }
-        // 必须去掉 watchdog 角色，否则子进程会当守护进程空转
         var envList: [String] = []
         for (k, v) in ProcessInfo.processInfo.environment
-            where k != roleKey && k != parentKey && k != postUpdateKey && k != expectVerKey
+            where k != roleKey && k != parentKey && k != postUpdateKey
+            && k != expectVerKey && k != delayMsKey
         {
             envList.append("\(k)=\(v)")
         }
