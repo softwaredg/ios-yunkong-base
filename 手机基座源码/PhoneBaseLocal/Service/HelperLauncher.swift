@@ -178,26 +178,32 @@ enum HelperLauncher {
             if expectVersion.isEmpty { return TipaSelfUpdate.localVersion }
             return expectVersion
         }()
-        let deadline = Date().addingTimeInterval(12)
+        // 短等即可；活着但不听口时尽快失败，交给主进程回退
+        let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             if kill(pid, 0) != 0 {
                 AppRunLog.shared.append("Helper pid=\(pid) 已退出，健康检查中止")
                 return false
             }
-            // 主进程若又占口，不能把探活算在 Helper 头上
             if BaseRuntime.shared.isRunning {
-                usleep(400_000)
+                usleep(300_000)
                 continue
             }
             if tipaHealthy(expectVersion: probeExpect) {
                 return true
             }
-            usleep(400_000)
+            usleep(300_000)
         }
         let alive = kill(pid, 0) == 0
         AppRunLog.shared.append(
             "Helper 已 spawn，但健康检查超时 expect=\(probeExpect.isEmpty ? "any" : probeExpect) alive=\(alive ? 1 : 0)"
         )
+        // 僵死 Helper（进程在但不听口）立刻清掉，避免占资源
+        if alive {
+            kill(pid, SIGTERM)
+            usleep(50_000)
+            kill(pid, SIGKILL)
+        }
         return false
     }
 
