@@ -1,7 +1,7 @@
 import Foundation
 import UIKit
 
-/// 手机端自检 tipa 更新：拉清单 → apple-magnifier:// 直跳巨魔（失败再下载 + DocumentInteraction）。
+/// 手机端自检 tipa 更新：拉清单 → 样板式 apple-magnifier:// 直跳巨魔（workspace + UIApplication）。
 enum TipaSelfUpdate {
     static let manifestURL = URL(string: "https://touping.facaishu.vip/api/tipa/update")!
 
@@ -37,6 +37,60 @@ enum TipaSelfUpdate {
         allowed.insert(charactersIn: "-_.!~*'()")
         let encoded = tipaHttpsURL.addingPercentEncoding(withAllowedCharacters: allowed) ?? tipaHttpsURL
         return URL(string: "apple-magnifier://install?url=\(encoded)")
+    }
+
+    /// 对齐样板：LSApplicationWorkspace openSensitiveURL，再补 UIApplication.open。
+    /// 不走 DocumentInteraction，避免弹「打开方式」菜单。
+    static func openTrollStoreInstall(tipaHttpsURL: String, completion: ((Bool) -> Void)? = nil) {
+        guard let url = trollInstallURL(tipaHttpsURL: tipaHttpsURL) else {
+            DispatchQueue.main.async { completion?(false) }
+            return
+        }
+        openTrollStore(url: url, completion: completion)
+    }
+
+    /// 打开已有的 apple-magnifier:// 或 phonebase://（控制通道复用）。
+    static func openTrollStore(url: URL, completion: ((Bool) -> Void)? = nil) {
+        let run: () -> Void = {
+            // 样板先走 workspace；UIApplication 结果为准。
+            // workspace 已调用且 canOpenURL 为真时，允许 ui 回调 false 仍算成功（部分机型握手如此）。
+            let workspaceOk = openSensitiveURL(url)
+            let canOpen = UIApplication.shared.canOpenURL(url)
+            UIApplication.shared.open(url, options: [:]) { uiOk in
+                let ok = uiOk || (workspaceOk && canOpen)
+                if ok {
+                    AppRunLog.shared.append(
+                        "打开巨魔 ok workspace=\(workspaceOk ? 1 : 0) ui=\(uiOk ? 1 : 0) can=\(canOpen ? 1 : 0) scheme=\(url.scheme ?? "?")"
+                    )
+                } else {
+                    AppRunLog.shared.append(
+                        "打开巨魔失败 workspace=\(workspaceOk ? 1 : 0) ui=\(uiOk ? 1 : 0) can=\(canOpen ? 1 : 0) scheme=\(url.scheme ?? "?")"
+                    )
+                }
+                completion?(ok)
+            }
+        }
+        if Thread.isMainThread {
+            run()
+        } else {
+            DispatchQueue.main.async(execute: run)
+        }
+    }
+
+    /// 样板同款：defaultWorkspace openSensitiveURL:withOptions:
+    @discardableResult
+    static func openSensitiveURL(_ url: URL) -> Bool {
+        guard let workspace = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type else {
+            return false
+        }
+        let selDefault = NSSelectorFromString("defaultWorkspace")
+        guard workspace.responds(to: selDefault),
+              let ws = workspace.perform(selDefault)?.takeUnretainedValue() as? NSObject
+        else { return false }
+        let sel = NSSelectorFromString("openSensitiveURL:withOptions:")
+        guard ws.responds(to: sel) else { return false }
+        _ = ws.perform(sel, with: url, with: nil)
+        return true
     }
 
     static func check(completion: @escaping (CheckResult) -> Void) {
@@ -156,51 +210,19 @@ enum TipaSelfUpdate {
         return String(name[r])
     }
 
-    /// 兼容旧调用：直接 magnifier（无下载）。
+    /// 兼容旧调用：武装后样板式直跳巨魔。
     @discardableResult
     static func openInstall(manifest: Manifest, completion: ((Bool) -> Void)? = nil) -> Bool {
-        guard let u = trollInstallURL(tipaHttpsURL: manifest.url) else {
+        guard trollInstallURL(tipaHttpsURL: manifest.url) != nil else {
             completion?(false)
             return false
         }
         let ver = manifest.version
+        let tipaURL = manifest.url
         DispatchQueue.global(qos: .userInitiated).async {
             HelperLauncher.armPostUpdate(expectVersion: ver)
-            DispatchQueue.main.async {
-                UIApplication.shared.open(u, options: [:]) { ok in
-                    completion?(ok)
-                }
-            }
+            openTrollStoreInstall(tipaHttpsURL: tipaURL, completion: completion)
         }
         return true
-    }
-}
-
-/// 持有 DocumentInteraction，避免早释放。
-final class TipaDocumentHandoff: NSObject, UIDocumentInteractionControllerDelegate {
-    static let shared = TipaDocumentHandoff()
-    private var doc: UIDocumentInteractionController?
-    private weak var presenter: UIViewController?
-
-    func present(fileURL: URL, from vc: UIViewController, anchor: UIView) -> Bool {
-        presenter = vc
-        let c = UIDocumentInteractionController(url: fileURL)
-        c.delegate = self
-        // 不强制 UTI，便于系统列出巨魔（.tipa / .ipa）
-        doc = c
-        let ok = c.presentOpenInMenu(from: anchor.bounds, in: anchor, animated: true)
-        if !ok {
-            // 再试 options menu
-            return c.presentOptionsMenu(from: anchor.bounds, in: anchor, animated: true)
-        }
-        return ok
-    }
-
-    func documentInteractionControllerDidDismissOpenInMenu(_ controller: UIDocumentInteractionController) {
-        // keep doc until next handoff
-    }
-
-    func documentInteractionController(_ controller: UIDocumentInteractionController, didEndSendingToApplication application: String?) {
-        AppRunLog.shared.append("已交给应用打开 tipa：\(application ?? "?")")
     }
 }
