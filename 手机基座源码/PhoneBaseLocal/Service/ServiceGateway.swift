@@ -13,6 +13,8 @@ final class ServiceGateway {
     private var usingInProcess = false
     /// 用户点过停止后，启动自动 ensure 不再强行拉起，直到再次点启动
     private var userStopped = false
+    /// 启停代数：stop/start 互相作废对方的在途工作，避免并发把新服务拆掉
+    private var epoch: UInt64 = 0
     private let lock = NSLock()
 
     var isRunning: Bool {
@@ -21,7 +23,20 @@ final class ServiceGateway {
         return cachedRunning
     }
 
+    /// 是否由主进程在听（供 UI / 停止路径判断）。
+    var isInProcess: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return usingInProcess
+    }
+
     private init() {}
+
+    /// 本机 11019 由 Helper 提供（主进程已在听时绝不算 Helper）。
+    private static func helperServing() -> Bool {
+        if BaseRuntime.shared.isRunning { return false }
+        return HelperLauncher.isHelperAlive() && HelperLauncher.tipaHealthy(expectVersion: "")
+    }
 
     func refreshStatus(completion: (() -> Void)? = nil) {
         let apply: () -> Void = { [weak self] in
@@ -29,15 +44,20 @@ final class ServiceGateway {
                 DispatchQueue.main.async { completion?() }
                 return
             }
-            let helperOk = HelperLauncher.tipaHealthy(expectVersion: "")
+            let helperOk = Self.helperServing()
             let localOk = BaseRuntime.shared.isRunning
             self.lock.lock()
             if self.userStopped {
                 self.cachedRunning = false
             } else {
                 self.cachedRunning = helperOk || localOk
-                if helperOk { self.usingInProcess = false }
-                else if localOk { self.usingInProcess = true }
+                if helperOk {
+                    self.usingInProcess = false
+                } else if localOk {
+                    self.usingInProcess = true
+                } else {
+                    self.usingInProcess = false
+                }
             }
             self.lock.unlock()
             DispatchQueue.main.async { completion?() }
@@ -62,37 +82,58 @@ final class ServiceGateway {
     func start() -> Bool {
         lock.lock()
         userStopped = false
+        epoch &+= 1
+        let myEpoch = epoch
         lock.unlock()
         DispatchQueue.main.async { [weak self] in
             self?.onStatus?("正在启动服务…")
         }
         if Thread.isMainThread {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                _ = self?.startBlocking()
+                _ = self?.startBlocking(epoch: myEpoch)
             }
             return true
         }
-        return startBlocking()
+        return startBlocking(epoch: myEpoch)
     }
 
     @discardableResult
-    private func startBlocking() -> Bool {
-        let helperOk = HelperLauncher.ensureRunning()
-        let expect = TipaSelfUpdate.localVersion
-        let deadline = Date().addingTimeInterval(8)
-        var healthy = HelperLauncher.tipaHealthy(expectVersion: expect)
-        while !healthy && Date() < deadline {
-            usleep(400_000)
-            healthy = HelperLauncher.tipaHealthy(expectVersion: expect)
-            if !healthy {
-                // 版本戳异常时，至少确认有 lan-phonebase 在听
-                healthy = HelperLauncher.tipaHealthy(expectVersion: "")
-                    && HelperLauncher.isHelperAlive()
+    private func startBlocking(epoch myEpoch: UInt64) -> Bool {
+        // 过期 start 只退出，禁止 terminate：可能误杀新一代刚拉起的 Helper
+        if isStale(myEpoch) { return false }
+
+        if BaseRuntime.shared.isRunning {
+            lock.lock()
+            if userStopped || epoch != myEpoch {
+                lock.unlock()
+                return false
             }
+            cachedRunning = true
+            usingInProcess = true
+            lock.unlock()
+            let status = "服务已启动（主进程）· 本机:\(port)"
+            DispatchQueue.main.async { [weak self] in self?.onStatus?(status) }
+            return true
+        }
+
+        let helperOk = HelperLauncher.ensureRunning()
+        if isStale(myEpoch) { return false }
+
+        let deadline = Date().addingTimeInterval(8)
+        var healthy = Self.helperServing()
+        while !healthy && Date() < deadline {
+            if isStale(myEpoch) { return false }
+            if !helperOk, !HelperLauncher.isHelperAlive() { break }
+            usleep(400_000)
+            healthy = Self.helperServing()
         }
 
         if healthy {
             lock.lock()
+            if userStopped || epoch != myEpoch {
+                lock.unlock()
+                return false
+            }
             cachedRunning = true
             usingInProcess = false
             lock.unlock()
@@ -102,10 +143,16 @@ final class ServiceGateway {
             return true
         }
 
+        if isStale(myEpoch) { return false }
+
         AppRunLog.shared.append(
             "Helper 未就绪（spawn=\(helperOk ? "ok" : "fail") alive=\(HelperLauncher.isHelperAlive() ? 1 : 0)），回退主进程开服"
         )
-        // Helper 起不来：主进程直接开 BaseRuntime，保证 PC 能连
+        HelperLauncher.terminateHelper()
+        usleep(200_000)
+
+        if isStale(myEpoch) { return false }
+
         let localOk: Bool = {
             if Thread.isMainThread {
                 return BaseRuntime.shared.start(notifyStatus: true)
@@ -118,6 +165,17 @@ final class ServiceGateway {
         }()
 
         lock.lock()
+        if userStopped || epoch != myEpoch {
+            lock.unlock()
+            if localOk {
+                if Thread.isMainThread {
+                    BaseRuntime.shared.stop()
+                } else {
+                    DispatchQueue.main.sync { BaseRuntime.shared.stop() }
+                }
+            }
+            return false
+        }
         cachedRunning = localOk
         usingInProcess = localOk
         lock.unlock()
@@ -134,28 +192,45 @@ final class ServiceGateway {
         return localOk
     }
 
+    private func isStale(_ myEpoch: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return userStopped || epoch != myEpoch
+    }
+
     func stop() {
         AppRunLog.shared.append("用户停止服务")
+        let stopEpoch: UInt64
         lock.lock()
         userStopped = true
+        epoch &+= 1
+        stopEpoch = epoch
         cachedRunning = false
-        let local = usingInProcess
         usingInProcess = false
         lock.unlock()
         DispatchQueue.main.async { [weak self] in
             self?.onStatus?("正在停止服务…")
         }
-        let work = {
+        let work = { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let mine = self.userStopped && self.epoch == stopEpoch
+            self.lock.unlock()
+            guard mine else { return }
+
             HelperLauncher.terminateHelper()
-            if local || BaseRuntime.shared.isRunning {
+            if BaseRuntime.shared.isRunning {
                 if Thread.isMainThread {
                     BaseRuntime.shared.stop()
                 } else {
                     DispatchQueue.main.sync { BaseRuntime.shared.stop() }
                 }
             }
-            DispatchQueue.main.async { [weak self] in
-                self?.onStatus?("服务已停止")
+            DispatchQueue.main.async {
+                self.lock.lock()
+                let still = self.userStopped && self.epoch == stopEpoch
+                self.lock.unlock()
+                if still { self.onStatus?("服务已停止") }
             }
         }
         if Thread.isMainThread {

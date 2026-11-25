@@ -368,15 +368,24 @@ final class RootViewController: UIViewController {
             refreshIP()
             refreshDeviceInfo()
             refreshHero()
-        } else {
-            statusDetail.text = "正在拉起 Helper…"
-            _ = gateway.start()
-            // start 在后台完成；短延时刷新按钮态
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-                self?.refreshIP()
+            // 停止也在后台；多刷几次状态
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 self?.gateway.refreshStatus {
                     self?.refreshDeviceInfo()
                     self?.refreshHero()
+                }
+            }
+        } else {
+            statusDetail.text = "正在启动服务…"
+            _ = gateway.start()
+            // Helper 探活可能数秒，回退主进程也要等；分次刷新
+            for delay in [1.5, 4.0, 9.0, 14.0] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.refreshIP()
+                    self?.gateway.refreshStatus {
+                        self?.refreshDeviceInfo()
+                        self?.refreshHero()
+                    }
                 }
             }
         }

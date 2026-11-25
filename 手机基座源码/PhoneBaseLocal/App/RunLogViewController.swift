@@ -82,19 +82,20 @@ final class RunLogViewController: UIViewController {
             flashCopyTitle("无内容")
             return
         }
-        // 同时写字符串与明文 UTI，避免部分 App 粘贴读不到
-        UIPasteboard.general.items = [[
-            "public.utf8-plain-text": text,
-            "public.plain-text": text,
-        ]]
+        // 只用 string；再 setItems 在部分系统上会把剪贴板写空
         UIPasteboard.general.string = text
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         flashCopyTitle("已复制")
-        // 再给一个明确提示（prompt 在部分导航样式下几乎看不见）
-        let tip = UIAlertController(title: nil, message: "已复制 \(text.count) 字到剪贴板", preferredStyle: .alert)
+        let tip = UIAlertController(
+            title: nil,
+            message: "已复制 \(text.count) 字到剪贴板",
+            preferredStyle: .alert
+        )
         present(tip, animated: true)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak tip] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self, weak tip] in
             tip?.dismiss(animated: true)
+            // 防止快速连点叠多个 alert
+            _ = self
         }
     }
 

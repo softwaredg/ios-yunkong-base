@@ -10,6 +10,8 @@ final class TipaInstallGuideViewController: UIViewController {
     private let closeButton = UIButton(type: .system)
     private var didAutoStart = false
     private var localTipaURL: URL?
+    /// 用户点「稍后」后置位，丢弃在途 arm / 下载回调，避免标记被写回
+    private var cancelled = false
 
     init(manifest: TipaSelfUpdate.Manifest) {
         self.manifest = manifest
@@ -84,27 +86,39 @@ final class TipaInstallGuideViewController: UIViewController {
         if !didAutoStart {
             didAutoStart = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                self?.startInstall()
+                guard let self, !self.cancelled else { return }
+                self.startInstall()
             }
         }
     }
 
     @objc private func startInstall() {
+        guard !cancelled else { return }
         openButton.isEnabled = false
         statusLabel.text = "正在武装 Helper 并下载 \(manifest.version)…"
         let version = manifest.version
         // arm / spawn 可能干等数秒，必须离开主线程
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self, !self.cancelled else { return }
             HelperLauncher.armPostUpdate(expectVersion: version)
+            if self.cancelled {
+                UpdateMarker.clear()
+                return
+            }
             DispatchQueue.main.async {
-                self?.beginDownload()
+                guard let self, !self.cancelled else {
+                    UpdateMarker.clear()
+                    return
+                }
+                self.beginDownload()
             }
         }
     }
 
     private func beginDownload() {
+        guard !cancelled else { return }
         TipaSelfUpdate.downloadTipa(manifest: manifest) { [weak self] result in
-            guard let self else { return }
+            guard let self, !self.cancelled else { return }
             switch result {
             case let .success(fileURL):
                 self.localTipaURL = fileURL
@@ -151,6 +165,7 @@ final class TipaInstallGuideViewController: UIViewController {
     }
 
     @objc private func close() {
+        cancelled = true
         // 用户放弃安装：清掉装后标记，避免之后普通退出被 Helper 强行拉回
         UpdateMarker.clear()
         dismiss(animated: true)

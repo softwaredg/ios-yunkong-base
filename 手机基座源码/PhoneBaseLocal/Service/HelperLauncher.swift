@@ -37,17 +37,21 @@ enum HelperLauncher {
         gate.lock()
         defer { gate.unlock() }
         let expect = expectVersion.isEmpty ? TipaSelfUpdate.localVersion : expectVersion
-        if postUpdate {
-            UpdateMarker.write(expectVersion: expect, baselineLocal: TipaSelfUpdate.localVersion)
-        }
-        // pending 只表示「装后拉起」，探活不按版本卡死
-        let healthyExpect = (expect == "pending") ? "" : expect
-        if tipaHealthy(expectVersion: healthyExpect) {
-            NSLog("[HelperLauncher] service already healthy expect=%@", expect)
+        // 标记只由 armPostUpdate 写，避免取消安装 clear 后被 ensureRunning 写回
+        // 装前武装 / pending：只要求 Helper 在听；装后正常 ensure 才按本机版本踢旧进程
+        let healthyExpect = (postUpdate || expect == "pending") ? "" : expect
+        // 必须是 Helper 进程在听，且主进程未占口
+        if !BaseRuntime.shared.isRunning, isHelperAlive(), tipaHealthy(expectVersion: healthyExpect) {
+            NSLog("[HelperLauncher] helper already healthy expect=%@", expect)
             return true
         }
+        // 主进程占口时禁止 spawn（调用方应先 stop）；否则 waitHealthy 会把主进程探活当成 Helper 成功
+        if BaseRuntime.shared.isRunning {
+            NSLog("[HelperLauncher] refuse spawn: in-process BaseRuntime holds port")
+            AppRunLog.shared.append("拒绝拉 Helper：主进程仍占 11019")
+            return false
+        }
         // 先清旧 helper，再拉新的
-        // 注意：不要因残留 UpdateMarker 就带 postUpdate 环境，否则取消安装后普通退出也会被拉回前台
         terminateHelpers(except: getpid())
         return spawnHelper(
             postUpdate: postUpdate,
@@ -60,13 +64,38 @@ enum HelperLauncher {
         // expect 必须是目标新版本；空则用 pending 哨兵，避免写成 local 导致装前就被 resume 清掉
         let expect = expectVersion.isEmpty ? "pending" : expectVersion
         UpdateMarker.write(expectVersion: expect, baselineLocal: TipaSelfUpdate.localVersion)
-        // 装前必须保留现有 Helper（装后靠它拉主 App）；只写标记，不因版本杀掉
-        if tipaHealthy(expectVersion: "") {
-            AppRunLog.shared.append("已武装装后拉起（服务仍在）expect=\(expect)")
+        // 已在 Helper 内：只写标记，Supervisor 本进程会拉主 App；切勿 stop 自己
+        if ProcessRole.isHelper {
+            AppRunLog.shared.append("已武装装后拉起（本进程即 Helper）expect=\(expect)")
             return
         }
+        // 必须有真正的 Helper 在听，且主进程没占口
+        if !BaseRuntime.shared.isRunning, isHelperAlive(), tipaHealthy(expectVersion: "") {
+            AppRunLog.shared.append("已武装装后拉起（Helper 仍在）expect=\(expect)")
+            return
+        }
+        // 主进程占口时先停，再 spawn Helper，否则 Helper 绑不上 11019 / 没有 Supervisor
+        if BaseRuntime.shared.isRunning {
+            AppRunLog.shared.append("装前武装：主进程让出口给 Helper")
+            if Thread.isMainThread {
+                BaseRuntime.shared.stop()
+            } else {
+                DispatchQueue.main.sync { BaseRuntime.shared.stop() }
+            }
+            usleep(200_000)
+        }
         _ = ensureRunning(postUpdate: true, expectVersion: expect)
-        AppRunLog.shared.append("已武装 Helper 装后拉起 expect=\(expect)")
+        let alive = isHelperAlive()
+        AppRunLog.shared.append("已武装 Helper 装后拉起 expect=\(expect) alive=\(alive ? 1 : 0)")
+        // Helper 仍起不来：恢复主进程服务，装后只能手动打开（标记仍保留）
+        if !alive, !tipaHealthy(expectVersion: "") {
+            AppRunLog.shared.append("Helper 武装失败，恢复主进程开服（装后请手动打开）")
+            if Thread.isMainThread {
+                _ = BaseRuntime.shared.start(notifyStatus: true)
+            } else {
+                DispatchQueue.main.sync { _ = BaseRuntime.shared.start(notifyStatus: true) }
+            }
+        }
     }
 
     /// Helper 硬退出前：立刻再 spawn 替身（不写装后标记、不拉主 UI）。
@@ -143,19 +172,25 @@ enum HelperLauncher {
         }
         NSLog("[HelperLauncher] spawned helper pid=%d", pid)
         guard waitHealthy else { return true }
-        // 版本替换场景必须按 expect 探活，避免旧 Helper 仍占口被当成成功
+        // 装前武装（postUpdate）：只要协议通；装后 ensure 才按目标版本探活
         let probeExpect: String = {
-            if expectVersion == "pending" { return "" }
+            if postUpdate || expectVersion == "pending" { return "" }
             if expectVersion.isEmpty { return TipaSelfUpdate.localVersion }
             return expectVersion
         }()
         let deadline = Date().addingTimeInterval(12)
         while Date() < deadline {
-            if tipaHealthy(expectVersion: probeExpect) { return true }
-            // 进程已死则不必空等
             if kill(pid, 0) != 0 {
                 AppRunLog.shared.append("Helper pid=\(pid) 已退出，健康检查中止")
                 return false
+            }
+            // 主进程若又占口，不能把探活算在 Helper 头上
+            if BaseRuntime.shared.isRunning {
+                usleep(400_000)
+                continue
+            }
+            if tipaHealthy(expectVersion: probeExpect) {
+                return true
             }
             usleep(400_000)
         }

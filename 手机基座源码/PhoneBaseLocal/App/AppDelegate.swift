@@ -45,9 +45,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     ) -> Bool {
         guard url.scheme?.lowercased() == "phonebase" else { return false }
         BackgroundKeepAlive.shared.start()
+        // 走完整启动（含 Helper 失败时主进程回退），不要只 ensure Helper
         DispatchQueue.global(qos: .userInitiated).async {
-            _ = HelperLauncher.ensureRunning()
-            ServiceGateway.shared.refreshStatus()
+            _ = ServiceGateway.shared.start()
         }
         return true
     }

@@ -191,21 +191,24 @@ final class ControlHub {
             }
             let needArm = (url.scheme ?? "").lowercased() == "apple-magnifier"
             let parsedVer = TipaSelfUpdate.versionFromInstallURL(url) ?? ""
-            DispatchQueue.global(qos: .userInitiated).async {
-                if needArm {
-                    // 优先用 tipa URL 里的版本；解析不到则 pending，避免写成 local 导致装前被清标记
-                    HelperLauncher.armPostUpdate(expectVersion: parsedVer)
-                }
-                DispatchQueue.main.async { [weak self, weak session] in
-                    guard let self, let session else { return }
-                    UIApplication.shared.open(url, options: [:]) { ok in
-                        if ok {
-                            AppRunLog.shared.append("控制通道打开巨魔 scheme=\(url.scheme ?? "?")")
-                            self.ack(session, seq: seq, ok: true)
-                        } else {
-                            AppRunLog.shared.append("控制通道打开失败 scheme=\(url.scheme ?? "?")")
-                            self.ack(session, seq: seq, ok: false, error: "open failed")
+            // 先 open 巨魔，再武装：arm 在主进程回退时会 stop BaseRuntime 并掐断 WS，
+            // 若先 arm 会导致 session 释放、open 被跳过。
+            DispatchQueue.main.async { [weak self, weak session] in
+                guard let self else { return }
+                UIApplication.shared.open(url, options: [:]) { [weak self, weak session] ok in
+                    guard let self else { return }
+                    if ok {
+                        AppRunLog.shared.append("控制通道打开巨魔 scheme=\(url.scheme ?? "?")")
+                        if let session { self.ack(session, seq: seq, ok: true) }
+                        // 仅 open 成功再武装，避免失败也留下装后标记
+                        if needArm {
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                HelperLauncher.armPostUpdate(expectVersion: parsedVer)
+                            }
                         }
+                    } else {
+                        AppRunLog.shared.append("控制通道打开失败 scheme=\(url.scheme ?? "?")")
+                        if let session { self.ack(session, seq: seq, ok: false, error: "open failed") }
                     }
                 }
             }

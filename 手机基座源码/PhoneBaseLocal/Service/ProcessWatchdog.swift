@@ -11,14 +11,23 @@ enum ProcessWatchdog {
     }
 
     /// BaseRuntime 硬退出前调用（内存守卫 / control hard）。
-    /// Helper 只拉替身续服；不写装后标记，避免误把主 UI 拉回前台。
+    /// Helper：拉替身续服。主进程：先停听再 spawn Helper（否则口被本进程占着 Helper 绑不上）。
     static func spawnDeferredRelaunch(delayMs: UInt32 = 1500) {
         if ProcessRole.isHelper {
             _ = HelperLauncher.spawnReplacementHelper()
             if delayMs > 0 { usleep(delayMs * 1000) }
-        } else {
-            // 主 UI 进程不应再跑 BaseRuntime；兜底仍拉 Helper 续服
-            _ = HelperLauncher.ensureRunning()
+            return
         }
+        if BaseRuntime.shared.isRunning {
+            if Thread.isMainThread {
+                BaseRuntime.shared.stop()
+            } else {
+                DispatchQueue.main.sync { BaseRuntime.shared.stop() }
+            }
+            usleep(150_000)
+        }
+        // 不等待健康：随后本进程会 exit，Helper 起来后自行占口
+        _ = HelperLauncher.spawnReplacementHelper()
+        if delayMs > 0 { usleep(delayMs * 1000) }
     }
 }
