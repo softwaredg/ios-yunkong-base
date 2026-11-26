@@ -24,6 +24,8 @@ final class LocalHTTPServer {
     var onVideoSettings: ((String, [String: String], Data?) -> Data)?
     /// GET /api/clipboard/text（对齐样板）
     var onClipboardText: (() -> Data)?
+    /// GET /api/run-log；POST /api/run-log/clear
+    var onRunLog: ((String, String) -> Data)?
     var onVideoConnect: ((WebSocketSession, [String: String]) -> Void)?
     var onControlConnect: ((WebSocketSession) -> Void)?
 
@@ -264,6 +266,11 @@ final class LocalHTTPServer {
             respond(fd: fd, status: 200, contentType: "application/json", body: body)
         } else if method == "GET" && path == "/api/clipboard/text" {
             let body = onClipboardText?() ?? Data(#"{"ok":false,"error":"unavailable"}"#.utf8)
+            respond(fd: fd, status: 200, contentType: "application/json", body: body)
+        } else if (method == "GET" && path == "/api/run-log")
+                    || (method == "POST" && path == "/api/run-log/clear")
+        {
+            let body = onRunLog?(method, path) ?? Data(#"{"ok":false,"error":"no-handler"}"#.utf8)
             respond(fd: fd, status: 200, contentType: "application/json", body: body)
         } else if method == "OPTIONS" {
             respond(fd: fd, status: 204, contentType: "text/plain", body: Data())

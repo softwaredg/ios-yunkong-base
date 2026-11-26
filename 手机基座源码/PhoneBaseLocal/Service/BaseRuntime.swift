@@ -119,6 +119,10 @@ final class BaseRuntime {
                 return (try? JSONSerialization.data(withJSONObject: body))
                     ?? Data(#"{"ok":false,"error":"CLIPBOARD_UNAVAILABLE"}"#.utf8)
             }
+            srv.onRunLog = { [weak self] method, path in
+                self?.handleRunLog(method: method, path: path)
+                    ?? Data(#"{"ok":false,"error":"no-handler"}"#.utf8)
+            }
         }
         wire(server)
         wire(usbServer)
@@ -232,6 +236,21 @@ final class BaseRuntime {
         }
         MemoryGuard.shared.noteRestart(reason: "memory-guard-soft-ok")
         refreshMemoryGuardSticky()
+    }
+
+    private func handleRunLog(method: String, path: String) -> Data {
+        if method == "POST", path == "/api/run-log/clear" {
+            AppRunLog.shared.clear()
+            return jsonOK(["cleared": true])
+        }
+        if method == "GET", path == "/api/run-log" {
+            let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+            return jsonOK([
+                "version": ver,
+                "text": AppRunLog.shared.snapshot(),
+            ])
+        }
+        return Data(#"{"ok":false,"error":"not-found"}"#.utf8)
     }
 
     private func handleVideoSettings(method: String, query: [String: String], body: Data?) -> Data {
