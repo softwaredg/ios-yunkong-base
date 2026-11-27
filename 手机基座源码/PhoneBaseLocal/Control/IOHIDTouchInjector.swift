@@ -12,6 +12,8 @@ final class IOHIDTouchInjector: TouchInjector {
     private var touching = false
     private var lastX: Double = 0.5
     private var lastY: Double = 0.5
+    /// 样板 waiting-idle：按住时内存硬退延后
+    var controlInputPending: Bool { touching }
     /// 样板 PBTouchInjector 用 pointerQueue 保路径；latest-wins 会丢中间点，快拖悬浮球直接跟丢
     private var moveQueue: [(Double, Double)] = []
     private var moveDrainScheduled = false

@@ -7,7 +7,7 @@ import Darwin
 
 /// 系统级全屏采集（对齐 Direct `PBCapture`）：
 /// `CARenderServerRenderDisplay` + IOSurface CVPixelBufferPool。
-/// 无私有符号 / 权限不足时回退演示图案，保证协议通路可测。
+/// 对齐样板：dirty-skip + encode-rate pacing。
 final class DisplayCapture: NSObject {
     enum Backend: String {
         case direct
@@ -27,15 +27,25 @@ final class DisplayCapture: NSObject {
 
     private var pool: CVPixelBufferPool?
     private var renderDisplay: RenderDisplayFn?
+    private var dirtyFrameCount: DirtyCountFn?
     private let displayName = "LCD" as CFString
     /// 对齐样板 poolBusySkips：池分配失败时跳帧计数
     private(set) var poolBusySkips: Int = 0
+    private(set) var unchangedSkips: Int = 0
+    private(set) var pacingSkips: Int = 0
+    private var lastDirtyCount: UInt64 = 0
+    private var hasDirtyCount = false
+    private var forceFrame = false
+    private var targetFrameRate: Int = 60
+    private var nextDueUs: UInt64 = 0
+    private var lastAcceptedUs: UInt64 = 0
 
     var onPixelBuffer: ((CVPixelBuffer, CMTime) -> Void)?
 
     private typealias RenderDisplayFn = @convention(c) (
         UInt32, CFString?, IOSurfaceRef?, Int32, Int32
     ) -> Int32
+    private typealias DirtyCountFn = @convention(c) (UInt32) -> UInt64
 
     init(width: Int, height: Int) {
         self.width = max(2, width - (width % 2))
@@ -47,17 +57,29 @@ final class DisplayCapture: NSObject {
 
     var backendName: String { backend.rawValue }
 
+    func setTargetFrameRate(_ fps: Int) {
+        targetFrameRate = max(5, min(60, fps))
+        nextDueUs = 0
+    }
+
+    /// 关键帧 / 护栏后强制出一帧（绕过 dirty-skip）
+    func requestForceFrame() {
+        forceFrame = true
+    }
+
     func start() {
         stop(releasePool: false)
         if pool == nil { _ = preparePool() }
         isActive = true
         wantsFrames = true
         frameIndex = 0
+        nextDueUs = 0
+        forceFrame = true
         let link = CADisplayLink(target: self, selector: #selector(tick))
         link.preferredFramesPerSecond = 60
         link.add(to: .main, forMode: .common)
         displayLink = link
-        NSLog("[Capture] start backend=%@ %dx%d", backendName, width, height)
+        NSLog("[Capture] start backend=%@ %dx%d fps=%d", backendName, width, height, targetFrameRate)
     }
 
     func stop(releasePool: Bool = false) {
@@ -72,38 +94,81 @@ final class DisplayCapture: NSObject {
     /// softRestart / 内存护栏：拆掉 IOSurface 池，迫使下次 start 重建
     func releasePixelBufferPool() {
         pool = nil
-        NSLog("[Capture] releasePixelBufferPool skips=%d", poolBusySkips)
+        NSLog(
+            "[Capture] releasePixelBufferPool poolBusy=%d unchanged=%d pacing=%d",
+            poolBusySkips, unchangedSkips, pacingSkips
+        )
     }
 
     func setActive(_ active: Bool) {
         wantsFrames = active
         isActive = active && displayLink != nil
+        if active { forceFrame = true }
     }
 
     @objc private func tick() {
         guard wantsFrames else { return }
-        frameIndex += 1
-        let pts = CMTime(value: frameIndex, timescale: 60)
+        let nowUs = machContinuousUs()
+        let fps = UInt64(max(5, targetFrameRate))
+        let intervalUs = 1_000_000 / fps
+        if !forceFrame, nextDueUs > 0, nowUs < nextDueUs {
+            pacingSkips += 1
+            return
+        }
 
         if backend == .direct, let renderDisplay {
-            // dirty-skip 会在滑动动画里漏帧 → 一点卡；静帧省电以后再说
+            if !forceFrame, shouldSkipUnchanged() {
+                unchangedSkips += 1
+                return
+            }
             if let buffer = renderServerFrame(renderDisplay) {
-                renderedFrames += 1
-                onPixelBuffer?(buffer, pts)
+                acceptFrame(buffer, nowUs: nowUs, intervalUs: intervalUs)
                 return
             }
             failedFrames += 1
-            // Keep WS alive with demo while diagnosing private-API failures.
-            if let demo = renderDemoFrame() { onPixelBuffer?(demo, pts) }
+            if let demo = renderDemoFrame() {
+                acceptFrame(demo, nowUs: nowUs, intervalUs: intervalUs)
+            }
             return
         }
 
         if let demo = renderDemoFrame() {
-            renderedFrames += 1
-            onPixelBuffer?(demo, pts)
+            acceptFrame(demo, nowUs: nowUs, intervalUs: intervalUs)
         } else {
             failedFrames += 1
         }
+    }
+
+    private func acceptFrame(_ buffer: CVPixelBuffer, nowUs: UInt64, intervalUs: UInt64) {
+        forceFrame = false
+        frameIndex += 1
+        renderedFrames += 1
+        lastAcceptedUs = nowUs
+        nextDueUs = nowUs &+ intervalUs
+        let pts = CMTime(value: frameIndex, timescale: 60)
+        onPixelBuffer?(buffer, pts)
+    }
+
+    private func shouldSkipUnchanged() -> Bool {
+        guard let dirtyFrameCount else { return false }
+        let cur = dirtyFrameCount(0)
+        if !hasDirtyCount {
+            hasDirtyCount = true
+            lastDirtyCount = cur
+            return false
+        }
+        if cur == lastDirtyCount {
+            return true
+        }
+        lastDirtyCount = cur
+        return false
+    }
+
+    private func machContinuousUs() -> UInt64 {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        let t = mach_absolute_time()
+        return t * UInt64(info.numer) / UInt64(info.denom) / 1000
     }
 
     private func resolvePrivateAPIs() {
@@ -115,6 +180,9 @@ final class DisplayCapture: NSObject {
         }
         if let sym = dlsym(handle, "CARenderServerRenderDisplay") {
             renderDisplay = unsafeBitCast(sym, to: RenderDisplayFn.self)
+        }
+        if let sym = dlsym(handle, "CARenderServerGetDirtyFrameCount") {
+            dirtyFrameCount = unsafeBitCast(sym, to: DirtyCountFn.self)
         }
         if renderDisplay != nil {
             backend = .direct
@@ -171,11 +239,9 @@ final class DisplayCapture: NSObject {
             return nil
         }
         let surface = surfaceUnmanaged.takeUnretainedValue()
-        // Direct helper: CARenderServerRenderDisplay(…, "LCD", surface, …)
         let rc = render(0, displayName, surface, 0, 0)
         if rc != 0 {
             lastError = "RenderDisplay rc=\(rc)"
-            // One alternate display name used on some builds.
             let rc2 = render(0, "Main" as CFString, surface, 0, 0)
             if rc2 != 0 {
                 lastError = "RenderDisplay rc=\(rc)/\(rc2)"

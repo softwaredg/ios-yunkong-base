@@ -146,10 +146,29 @@ final class VideoSettingsStore {
     /// 1000 = 100%；发送背压时下调（对齐官方 networkBitratePermille）
     private var networkBitratePermille = 1000
     private var generation = 1
+    /// 样板 trimmedForPressure：只压 effective，不改用户 requested
+    private var pressureTrimmed = false
+    private static let udKey = "local.videoSettings.foreground.v1"
+    private static let udTrimKey = "local.videoSettings.pressureTrimmed"
+
+    private init() {
+        loadPersisted()
+    }
 
     var defaults: VideoStreamProfile {
         lock.lock(); defer { lock.unlock() }
         return effectiveProfileLocked()
+    }
+
+    /// 用户请求档（未套 trim）
+    var requested: VideoStreamProfile {
+        lock.lock(); defer { lock.unlock() }
+        return _defaults
+    }
+
+    var isPressureTrimmed: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return pressureTrimmed
     }
 
     var status: [String: Any] {
@@ -170,6 +189,8 @@ final class VideoSettingsStore {
             "generation": generation,
             "profile": p.profile,
             "maxDimension": p.maxDimension,
+            "pressureTrimmed": pressureTrimmed,
+            "requested": _defaults.json,
         ]
     }
 
@@ -195,9 +216,20 @@ final class VideoSettingsStore {
             bitrateBps: mbps * 1_000_000
         )
         generation += 1
+        persistLocked()
         let out = effectiveProfileLocked()
         lock.unlock()
         return out
+    }
+
+    /// 对齐样板 effectiveProfileLocked：trim 时封顶，不改 requested
+    func setPressureTrimmed(_ on: Bool) {
+        lock.lock()
+        let changed = pressureTrimmed != on
+        pressureTrimmed = on
+        if changed { generation += 1 }
+        persistLocked()
+        lock.unlock()
     }
 
     /// 拥塞反馈：permille∈[400,1000]
@@ -216,7 +248,16 @@ final class VideoSettingsStore {
     }
 
     private func effectiveProfileLocked() -> VideoStreamProfile {
-        let base = _defaults
+        var base = _defaults
+        if pressureTrimmed {
+            let dim = base.maxDimension == 0 ? 720 : min(base.maxDimension, 720)
+            base = VideoStreamProfile(
+                profile: "foreground",
+                maxDimension: dim,
+                frameRate: min(base.frameRate, 20),
+                bitrateBps: min(base.bitrateBps, 2_000_000)
+            )
+        }
         let br = max(400_000, base.bitrateBps * networkBitratePermille / 1000)
         let minBps = minBitrateMbps * 1_000_000
         let maxBps = maxBitrateMbps * 1_000_000
@@ -226,6 +267,19 @@ final class VideoSettingsStore {
             frameRate: base.frameRate,
             bitrateBps: min(maxBps, max(minBps, br))
         )
+    }
+
+    private func persistLocked() {
+        UserDefaults.standard.set(pressureTrimmed, forKey: Self.udTrimKey)
+        UserDefaults.standard.set(_defaults.json, forKey: Self.udKey)
+    }
+
+    private func loadPersisted() {
+        pressureTrimmed = UserDefaults.standard.bool(forKey: Self.udTrimKey)
+        guard let obj = UserDefaults.standard.dictionary(forKey: Self.udKey) else { return }
+        let loaded = VideoStreamProfile.from(json: obj, current: .foregroundDefault)
+        _defaults = loaded
+        if loaded.frameRate > 0 { requestedFrameRate = loaded.frameRate }
     }
 
     private func clamp(_ v: Int, _ lo: Int, _ hi: Int) -> Int {

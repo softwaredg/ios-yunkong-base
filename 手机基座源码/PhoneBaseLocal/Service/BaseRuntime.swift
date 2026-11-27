@@ -35,8 +35,6 @@ final class BaseRuntime {
     private let connLogMinInterval: TimeInterval = 120
     /// memory-guard 硬重启连击：达到阈值则 hard exit，交给 ProcessWatchdog
     private var memHardStreak = 0
-    /// 护栏降质粘性：足迹降回软阈以下才允许 PC 升画质
-    private var memoryGuardSticky = false
     /// ≥800MB 一票否决：跳过软重启直接硬退
     private let memVetoBytes: UInt64 = 800 * 1024 * 1024
 
@@ -134,46 +132,43 @@ final class BaseRuntime {
             self?.publisher.encode(buffer: buffer, presentationTime: pts)
         }
 
-        MemoryGuard.shared.onSoftLimit = { [weak self] bytes in
-            self?.degradeForMemory(bytes: bytes)
+        MemoryGuard.shared.onTrim = { [weak self] bytes in
+            self?.handleMemoryTrim(bytes: bytes)
         }
         MemoryGuard.shared.onOverLimit = { [weak self] bytes in
             self?.handleMemoryHard(bytes: bytes)
         }
         MemoryGuard.shared.onRecovered = { [weak self] in
-            self?.memoryGuardSticky = false
             self?.memHardStreak = 0
+            VideoSettingsStore.shared.setPressureTrimmed(false)
+            self?.syncCaptureRateFromSettings()
+            self?.publisher.applyDefaultsFromSettings()
             self?.notify("内存护栏恢复 · 允许升画质")
         }
         MemoryGuard.shared.start()
+        // start() 之后再同步两端 trim 标记（看门狗拉起后继续有效档封顶）
+        if MemoryGuard.shared.trimmedForPressure {
+            VideoSettingsStore.shared.setPressureTrimmed(true)
+        } else if VideoSettingsStore.shared.isPressureTrimmed {
+            MemoryGuard.shared.setTrimmedForPressure(true)
+        }
+        syncCaptureRateFromSettings()
         InterfaceOrientationWatch.bootstrap()
     }
 
-    /// 软阈值：先降前景画质 + releaseUnusedMemory，避免一上来 softRestart 空转。
-    private func degradeForMemory(bytes: UInt64, resetHardStreak: Bool = true) {
-        memoryGuardSticky = true
-        let cur = VideoSettingsStore.shared.defaults
-        let need =
-            cur.frameRate > 20 ||
-            cur.bitrateBps > 2_000_000 ||
-            cur.maxDimension == 0 ||
-            cur.maxDimension > 720
-        if need {
-            let degraded = VideoStreamProfile(
-                profile: "foreground",
-                maxDimension: 720,
-                frameRate: 20,
-                bitrateBps: 2_000_000
-            )
-            _ = VideoSettingsStore.shared.apply(degraded)
-            publisher.applyDefaultsFromSettings()
-            notify("内存偏高 · 已降画质 20fps/2Mbps/720 footprint=\(bytes)")
-        } else {
-            notify("内存偏高 · 画质已是低档 footprint=\(bytes)")
+    /// 样板 trimmedForPressure：只压有效档一次，不刷 soft 日志。
+    private func handleMemoryTrim(bytes: UInt64) {
+        let already = VideoSettingsStore.shared.isPressureTrimmed
+        VideoSettingsStore.shared.setPressureTrimmed(true)
+        MemoryGuard.shared.setTrimmedForPressure(true)
+        publisher.applyDefaultsFromSettings()
+        syncCaptureRateFromSettings()
+        if already {
+            return
         }
-        releaseUnusedMemory(reason: "soft-limit")
-        if resetHardStreak { memHardStreak = 0 }
-        refreshMemoryGuardSticky()
+        notify("内存偏高 · 已压画质(有效档) 20fps/2Mbps/720 footprint=\(bytes)")
+        releaseUnusedMemory(reason: "trim")
+        memHardStreak = 0
     }
 
     /// 对齐样板 releaseUnusedMemory：拆池、清编码器积压、向 malloc 施压。
@@ -186,16 +181,20 @@ final class BaseRuntime {
         URLCache.shared.removeAllCachedResponses()
         notify("releaseUnusedMemory · \(reason) footprint=\(MemoryGuard.physFootprint())")
         if isRunning {
+            syncCaptureRateFromSettings()
             capture.start()
             setStreamingActive(true)
+            capture.requestForceFrame()
             publisher.requestKeyframe()
         }
     }
 
-    private func refreshMemoryGuardSticky() {
-        if MemoryGuard.physFootprint() < MemoryGuard.shared.softLimitBytes {
-            memoryGuardSticky = false
-        }
+    private func syncCaptureRateFromSettings() {
+        capture.setTargetFrameRate(VideoSettingsStore.shared.defaults.frameRate)
+    }
+
+    private var trimmedForPressure: Bool {
+        MemoryGuard.shared.trimmedForPressure || VideoSettingsStore.shared.isPressureTrimmed
     }
 
     private func isEncodeUpgrade(_ next: VideoStreamProfile, from cur: VideoStreamProfile) -> Bool {
@@ -207,6 +206,7 @@ final class BaseRuntime {
     }
 
     private func hardExitForMemory(bytes: UInt64, reason: String) {
+        MemoryGuard.shared.markRestarting()
         notify("内存仍高 · 硬重启并由看门狗拉起 footprint=\(bytes) reason=\(reason)")
         MemoryGuard.shared.noteRestart(reason: reason)
         ProcessWatchdog.spawnDeferredRelaunch(delayMs: 1500)
@@ -215,27 +215,28 @@ final class BaseRuntime {
         }
     }
 
-    /// 硬阈值：降质 + 真回收 softRestart；仍超或 ≥800MB → hard exit。
+    /// 硬阈：release → waiting-idle（触控中）→ 仍超则 hard exit。
     private func handleMemoryHard(bytes: UInt64) {
-        degradeForMemory(bytes: bytes, resetHardStreak: false)
+        if !VideoSettingsStore.shared.isPressureTrimmed {
+            handleMemoryTrim(bytes: bytes)
+        }
         if bytes >= memVetoBytes {
             hardExitForMemory(bytes: bytes, reason: "memory-guard-veto-800")
             return
         }
+        if injector.controlInputPending {
+            MemoryGuard.shared.markWaitingIdle()
+            return
+        }
         memHardStreak += 1
-        // soft 路径先不 noteRestart，避免 15s 节流把后续硬退挡掉；硬退或软成功再记
-        _ = softRestart(
-            reason: "memory-guard",
-            detail: "footprint=\(bytes) streak=\(memHardStreak)",
-            note: false
-        )
+        releaseUnusedMemory(reason: "memory-guard")
         let after = MemoryGuard.physFootprint()
-        if after >= MemoryGuard.shared.limitBytes || memHardStreak >= 2 {
+        if after >= MemoryGuard.shared.memoryLimitBytes || memHardStreak >= 2 {
             hardExitForMemory(bytes: after, reason: "memory-guard-hard")
             return
         }
         MemoryGuard.shared.noteRestart(reason: "memory-guard-soft-ok")
-        refreshMemoryGuardSticky()
+        notify("已重启 · memory-guard · footprint=\(bytes)→\(after) streak=\(memHardStreak)")
     }
 
     private func handleRunLog(method: String, path: String) -> Data {
@@ -264,11 +265,11 @@ final class BaseRuntime {
             patch = obj
         }
         for (k, v) in query { patch[k] = v }
-        let cur = VideoSettingsStore.shared.defaults
+        let cur = VideoSettingsStore.shared.requested
         let next = VideoStreamProfile.from(json: patch, current: cur)
-        refreshMemoryGuardSticky()
         let underPressure =
-            memoryGuardSticky || MemoryGuard.physFootprint() >= MemoryGuard.shared.softLimitBytes
+            trimmedForPressure
+            || MemoryGuard.physFootprint() >= MemoryGuard.shared.trimThresholdBytes
         if underPressure, isEncodeUpgrade(next, from: cur) {
             let fp = MemoryGuard.physFootprint()
             notify(
@@ -284,6 +285,7 @@ final class BaseRuntime {
         let applied = VideoSettingsStore.shared.apply(next)
         DispatchQueue.main.async { [weak self] in
             self?.publisher.applyDefaultsFromSettings()
+            self?.syncCaptureRateFromSettings()
             self?.notify("画质已更新 · \(applied.frameRate)fps · \(applied.bitrateBps / 1000)kbps")
         }
         var out = VideoSettingsStore.shared.status
@@ -365,6 +367,7 @@ final class BaseRuntime {
         }
         do {
             try startListeners()
+            syncCaptureRateFromSettings()
             capture.start()
             isRunning = true
             BackgroundKeepAlive.shared.start()
@@ -372,6 +375,7 @@ final class BaseRuntime {
             if notifyStatus {
                 notify(startupMessage(retired: retired.killed, extra: nil))
             }
+            capture.requestForceFrame()
             publisher.requestKeyframe()
             startOrientationWatch()
             return true
@@ -381,6 +385,7 @@ final class BaseRuntime {
             usleep(200_000)
             do {
                 try startListeners()
+                syncCaptureRateFromSettings()
                 capture.start()
                 isRunning = true
                 BackgroundKeepAlive.shared.start()
@@ -388,6 +393,7 @@ final class BaseRuntime {
                 if notifyStatus {
                     notify(startupMessage(retired: retired.killed + freed.killed, extra: "二次清理后启动 ✓"))
                 }
+                capture.requestForceFrame()
                 publisher.requestKeyframe()
                 startOrientationWatch()
                 return true
@@ -522,7 +528,10 @@ final class BaseRuntime {
             "captureError": capture.lastError,
             "frames": capture.renderedFrames,
             "poolBusySkips": capture.poolBusySkips,
-            "memoryGuardSticky": memoryGuardSticky,
+            "unchangedSkips": capture.unchangedSkips,
+            "pacingSkips": capture.pacingSkips,
+            "trimmedForPressure": trimmedForPressure,
+            "memoryGuardSticky": trimmedForPressure,
             "width": w,
             "height": h,
             "controlAvailable": true,

@@ -8,6 +8,12 @@ protocol TouchInjector: AnyObject {
     func pressAppSwitcher()
     func injectText(_ text: String)
     func injectKey(_ key: String)
+    /// 样板 waiting-idle：指针按住时勿硬重启
+    var controlInputPending: Bool { get }
+}
+
+extension TouchInjector {
+    var controlInputPending: Bool { false }
 }
 
 enum TouchInjectors {
@@ -23,6 +29,8 @@ enum TouchInjectors {
 
 /// 默认实现：仅日志。系统级注入见 `IOHIDTouchInjector`。
 final class LogTouchInjector: TouchInjector {
+    var controlInputPending: Bool { false }
+
     func pointer(action: String, x: Double, y: Double) {
         NSLog("[Touch] %@ (%.4f, %.4f)", action, x, y)
     }
