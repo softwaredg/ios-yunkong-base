@@ -13,6 +13,7 @@ final class ServiceGateway {
     private var userStopped = false
     private var epoch: UInt64 = 0
     private let lock = NSLock()
+    private var handoffWork: DispatchWorkItem?
 
     var isRunning: Bool {
         lock.lock()
@@ -131,19 +132,19 @@ final class ServiceGateway {
             healthy = Self.helperServing()
         }
 
-        if healthy {
-            lock.lock()
-            if userStopped || epoch != myEpoch {
-                lock.unlock()
-                return false
+        // ensure 失败但 Helper 进程仍在：再给短窗，确认死透再兜底
+        if !healthy, HelperLauncher.isHelperAlive() {
+            AppRunLog.shared.append("Helper 仍存活，延长探活 8s")
+            let extra = Date().addingTimeInterval(8)
+            while !healthy && Date() < extra {
+                if isStale(myEpoch) { return false }
+                usleep(300_000)
+                healthy = Self.helperServing()
             }
-            cachedRunning = true
-            usingInProcess = false
-            lock.unlock()
-            let status = "服务已启动（Helper）· 本机:\(port)"
-            AppRunLog.shared.append("用户启动服务 → Helper 就绪（常驻）")
-            DispatchQueue.main.async { [weak self] in self?.onStatus?(status) }
-            return true
+        }
+
+        if healthy {
+            return commitHelperReady(epoch: myEpoch)
         }
 
         if isStale(myEpoch) { return false }
@@ -156,6 +157,7 @@ final class ServiceGateway {
         if isStale(myEpoch) { return false }
 
         if commitInProcessFallback(epoch: myEpoch) {
+            scheduleHandoffToHelper(delaySec: 5, reason: "after-fallback")
             return true
         }
 
@@ -163,6 +165,21 @@ final class ServiceGateway {
         AppRunLog.shared.append("启动失败：Helper 与主进程均未就绪")
         DispatchQueue.main.async { [weak self] in self?.onStatus?(status) }
         return false
+    }
+
+    private func commitHelperReady(epoch myEpoch: UInt64) -> Bool {
+        lock.lock()
+        if userStopped || epoch != myEpoch {
+            lock.unlock()
+            return false
+        }
+        cachedRunning = true
+        usingInProcess = false
+        lock.unlock()
+        let status = "服务已启动（Helper）· 本机:\(port)"
+        AppRunLog.shared.append("用户启动服务 → Helper 就绪（常驻）")
+        DispatchQueue.main.async { [weak self] in self?.onStatus?(status) }
+        return true
     }
 
     /// 仅 Helper 起不来时兜底；会清 Helper 并由主进程占口。
@@ -216,8 +233,97 @@ final class ServiceGateway {
         return userStopped || epoch != myEpoch
     }
 
+    private func scheduleHandoffToHelper(delaySec: TimeInterval, reason: String) {
+        handoffWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.tryHandoffToHelper(reason: reason)
+        }
+        handoffWork = work
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + delaySec, execute: work)
+    }
+
+    /// 主进程兜底听口时，尽量把 11019 交回 Helper（进后台必走，避免主 UI 被杀带走服务）。
+    func tryHandoffToHelper(reason: String) {
+        lock.lock()
+        let stopped = userStopped
+        let inProc = usingInProcess && cachedRunning
+        lock.unlock()
+        guard !stopped, inProc, ServeIntent.shouldServe else { return }
+        if Self.helperServing() {
+            lock.lock()
+            usingInProcess = false
+            cachedRunning = true
+            lock.unlock()
+            return
+        }
+
+        AppRunLog.shared.append("交回 Helper · \(reason)")
+        if BaseRuntime.shared.isRunning {
+            if Thread.isMainThread {
+                BaseRuntime.shared.stop()
+            } else {
+                DispatchQueue.main.sync { BaseRuntime.shared.stop() }
+            }
+            usleep(200_000)
+        }
+
+        let ok = HelperLauncher.ensureRunning()
+        var healthy = Self.helperServing()
+        if !healthy, HelperLauncher.isHelperAlive() {
+            let deadline = Date().addingTimeInterval(8)
+            while !healthy && Date() < deadline {
+                usleep(300_000)
+                healthy = Self.helperServing()
+            }
+        }
+
+        if healthy {
+            lock.lock()
+            if !userStopped {
+                cachedRunning = true
+                usingInProcess = false
+            }
+            lock.unlock()
+            AppRunLog.shared.append("交回 Helper 成功 · \(reason)")
+            DispatchQueue.main.async { [weak self] in
+                self?.onStatus?("服务已交回 Helper · 本机:\(self?.port ?? 11019)")
+            }
+            return
+        }
+
+        AppRunLog.shared.append(
+            "交回 Helper 失败 · \(reason) spawn=\(ok ? "ok" : "fail") → 恢复主进程听口"
+        )
+        HelperLauncher.terminateHelper()
+        usleep(100_000)
+        let restored: Bool = {
+            if Thread.isMainThread {
+                return BaseRuntime.shared.start(notifyStatus: true)
+            }
+            var result = false
+            DispatchQueue.main.sync {
+                result = BaseRuntime.shared.start(notifyStatus: true)
+            }
+            return result
+        }()
+        lock.lock()
+        if !userStopped {
+            cachedRunning = restored
+            usingInProcess = restored
+        }
+        lock.unlock()
+        if restored {
+            // 稍后还试一次；进后台那次不排队，避免拖死
+            if reason != "enter-background" {
+                scheduleHandoffToHelper(delaySec: 12, reason: "retry-after-fail")
+            }
+        }
+    }
+
     func stop() {
         AppRunLog.shared.append("用户停止服务")
+        handoffWork?.cancel()
+        handoffWork = nil
         ServeIntent.set(false)
         let stopEpoch: UInt64
         lock.lock()

@@ -1,6 +1,7 @@
 import Foundation
+import Darwin
 
-/// 进程内运行日志（环形缓冲 + 落盘），供「运行日志」页展示。
+/// 主 UI / Helper 共享运行日志：Library 落盘 + 追加写，避免两进程整文件互盖。
 final class AppRunLog {
     static let shared = AppRunLog()
 
@@ -16,24 +17,32 @@ final class AppRunLog {
         return f
     }()
     private var persistWorkItem: DispatchWorkItem?
+    /// 尚未落盘的行（只追加写，不整文件覆盖）
+    private var pending: [String] = []
 
     private init() {
-        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-        fileURL = dir?.appendingPathComponent("phonebase_run.log")
+        fileURL = Self.sharedLogURL()
         queue.sync {
-            if let url = fileURL, let data = try? Data(contentsOf: url),
-               let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-                if lines.count > maxLines {
-                    lines = Array(lines.suffix(maxLines))
-                }
-            }
+            reloadFromDiskLocked()
             appendLocked("========== 本地基座运行日志 ==========")
             let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
             let bid = Bundle.main.bundleIdentifier ?? "?"
-            appendLocked("应用启动 · 版本 \(ver) · \(bid)")
+            let role = ProcessRole.isHelper ? "helper" : "main"
+            appendLocked("应用启动 · 版本 \(ver) · \(bid) · \(role)")
             persistLockedNow()
         }
+    }
+
+    private static func sharedLogURL() -> URL? {
+        // 与 ServeIntent 同级 Library，主/Helper 共容器时同一文件
+        if let home = ProcessInfo.processInfo.environment["HOME"], !home.isEmpty {
+            return URL(fileURLWithPath: home)
+                .appendingPathComponent("Library", isDirectory: true)
+                .appendingPathComponent("phonebase_run.log")
+        }
+        let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
+            ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        return base?.appendingPathComponent("phonebase_run.log")
     }
 
     func append(_ message: String) {
@@ -46,12 +55,20 @@ final class AppRunLog {
     }
 
     func snapshot() -> String {
-        queue.sync { lines.joined(separator: "\n") }
+        queue.sync {
+            // 读盘合并，带上对端进程刚写的行
+            self.reloadFromDiskLocked()
+            return self.lines.joined(separator: "\n")
+        }
     }
 
     func clear() {
         queue.sync {
             lines.removeAll(keepingCapacity: true)
+            pending.removeAll(keepingCapacity: true)
+            if let url = fileURL {
+                try? "".write(to: url, atomically: true, encoding: .utf8)
+            }
             appendLocked("日志已清空")
             persistLockedNow()
         }
@@ -68,6 +85,7 @@ final class AppRunLog {
         for (i, chunk) in chunks.enumerated() {
             let line = i == 0 ? "[\(stamp)] \(chunk)" : "           \(chunk)"
             lines.append(line)
+            pending.append(line)
         }
         if lines.count > maxLines {
             lines = Array(lines.suffix(maxLines))
@@ -80,15 +98,57 @@ final class AppRunLog {
             self?.persistLockedNow()
         }
         persistWorkItem = work
-        // 合并短时高频写入，避免连接通知刷盘
         queue.asyncAfter(deadline: .now() + 0.4, execute: work)
     }
 
     private func persistLockedNow() {
         persistWorkItem?.cancel()
         persistWorkItem = nil
-        guard let url = fileURL else { return }
-        let text = lines.joined(separator: "\n")
-        try? text.write(to: url, atomically: true, encoding: .utf8)
+        guard let url = fileURL, !pending.isEmpty else { return }
+        let chunk = pending.joined(separator: "\n") + "\n"
+        pending.removeAll(keepingCapacity: true)
+        let path = url.path
+        // O_CREAT|O_APPEND：勿用 createFile（会截断已有日志）
+        let fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        guard fd >= 0 else { return }
+        flock(fd, LOCK_EX)
+        chunk.withCString { ptr in
+            let len = strlen(ptr)
+            _ = write(fd, ptr, len)
+        }
+        flock(fd, LOCK_UN)
+        close(fd)
+        trimFileIfNeededLocked(url: url)
+    }
+
+    private func reloadFromDiskLocked() {
+        guard let url = fileURL, let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8), !text.isEmpty
+        else { return }
+        var disk = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        while disk.last == "" { disk.removeLast() }
+        if disk.count > maxLines {
+            disk = Array(disk.suffix(maxLines))
+        }
+        // 保留尚未落盘的 pending，叠在磁盘内容后
+        if pending.isEmpty {
+            lines = disk
+        } else {
+            lines = disk + pending
+            if lines.count > maxLines {
+                lines = Array(lines.suffix(maxLines))
+            }
+        }
+    }
+
+    private func trimFileIfNeededLocked(url: URL) {
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8)
+        else { return }
+        var all = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        while all.last == "" { all.removeLast() }
+        guard all.count > maxLines + 50 else { return }
+        let kept = Array(all.suffix(maxLines)).joined(separator: "\n") + "\n"
+        try? kept.write(to: url, atomically: true, encoding: .utf8)
     }
 }

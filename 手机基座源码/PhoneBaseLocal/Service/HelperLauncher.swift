@@ -129,8 +129,8 @@ enum HelperLauncher {
             postUpdate: false,
             expectVersion: "pending",
             waitHealthy: waitHealthy,
-            // 硬移交必须秒级失败回退，避免主进程挂起后数小时才记超时空窗
-            healthyTimeoutSec: waitHealthy ? 5 : 5,
+            // 硬移交：短超时；日常 ensure 用默认 15s
+            healthyTimeoutSec: 5,
             killIfUnhealthy: !waitHealthy
         )
     }
@@ -158,7 +158,7 @@ enum HelperLauncher {
         postUpdate: Bool,
         expectVersion: String,
         waitHealthy: Bool,
-        healthyTimeoutSec: TimeInterval = 5,
+        healthyTimeoutSec: TimeInterval = 15,
         killIfUnhealthy: Bool = true
     ) -> Bool {
         guard let exec = helperPath, FileManager.default.isExecutableFile(atPath: exec)
@@ -244,32 +244,53 @@ enum HelperLauncher {
             return expectVersion
         }()
         let timeout = max(2, healthyTimeoutSec)
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if kill(pid, 0) != 0 {
-                AppRunLog.shared.append("Helper pid=\(pid) 已退出，健康检查中止")
-                return false
-            }
-            // 主进程仍占口时 Helper 不可能听上：立刻失败，交给调用方软续服
-            if BaseRuntime.shared.isRunning {
-                AppRunLog.shared.append(
-                    "Helper 健康检查中止：主进程仍在听口 pid=\(pid) expect=\(probeExpect.isEmpty ? "any" : probeExpect)"
-                )
-                if killIfUnhealthy {
-                    kill(pid, SIGTERM)
-                    usleep(50_000)
-                    kill(pid, SIGKILL)
+        var lastReason = "pending"
+        func waitWindow(_ sec: TimeInterval) -> Bool {
+            let deadline = Date().addingTimeInterval(sec)
+            while Date() < deadline {
+                if kill(pid, 0) != 0 {
+                    lastReason = "exited"
+                    AppRunLog.shared.append("Helper pid=\(pid) 已退出，健康检查中止")
+                    return false
                 }
-                return false
+                // 主进程仍占口时 Helper 不可能听上：立刻失败，交给调用方软续服
+                if BaseRuntime.shared.isRunning {
+                    lastReason = "main-holds-port"
+                    AppRunLog.shared.append(
+                        "Helper 健康检查中止：主进程仍在听口 pid=\(pid) expect=\(probeExpect.isEmpty ? "any" : probeExpect)"
+                    )
+                    if killIfUnhealthy {
+                        kill(pid, SIGTERM)
+                        usleep(50_000)
+                        kill(pid, SIGKILL)
+                    }
+                    return false
+                }
+                let probe = tipaProbe(expectVersion: probeExpect)
+                lastReason = probe.reason
+                if probe.ok { return true }
+                usleep(200_000)
             }
-            if tipaHealthy(expectVersion: probeExpect) {
-                return true
-            }
-            usleep(200_000)
+            let last = tipaProbe(expectVersion: probeExpect)
+            lastReason = last.reason
+            return last.ok
         }
+
+        if waitWindow(timeout) { return true }
+
+        // alive 但口不通：再给一轮，避免 5/15s 一到就 SIGKILL 连杀
+        let aliveAfter = kill(pid, 0) == 0
+        if aliveAfter, lastReason != "exited", lastReason != "main-holds-port" {
+            AppRunLog.shared.append(
+                "Helper 首轮探活未过 reason=\(lastReason) expect=\(probeExpect.isEmpty ? "any" : probeExpect) → 再等 \(Int(timeout))s"
+            )
+            if waitWindow(timeout) { return true }
+        }
+
         let alive = kill(pid, 0) == 0
+        let finalReason = tipaProbe(expectVersion: probeExpect).reason
         AppRunLog.shared.append(
-            "Helper 已 spawn，但健康检查超时 expect=\(probeExpect.isEmpty ? "any" : probeExpect) alive=\(alive ? 1 : 0) kill=\(killIfUnhealthy ? 1 : 0) wallSec=\(Int(timeout))"
+            "Helper 已 spawn，但健康检查超时 expect=\(probeExpect.isEmpty ? "any" : probeExpect) alive=\(alive ? 1 : 0) kill=\(killIfUnhealthy ? 1 : 0) wallSec=\(Int(timeout)) reason=\(finalReason)"
         )
         // 硬退移交失败时留给调用方 terminate+主进程续服，避免此处误杀后口空窗
         if alive, killIfUnhealthy {
@@ -295,34 +316,68 @@ enum HelperLauncher {
     }
 
     static func tipaHealthy(expectVersion: String) -> Bool {
-        guard let url = URL(string: "http://127.0.0.1:11019/api/info") else { return false }
+        tipaProbe(expectVersion: expectVersion).ok
+    }
+
+    /// 探 11019 `/api/info`；reason 供超时日志（conn-refused / http-N / bad-proto / ver-…）。
+    static func tipaProbe(expectVersion: String) -> (ok: Bool, reason: String) {
+        guard let url = URL(string: "http://127.0.0.1:11019/api/info") else {
+            return (false, "bad-url")
+        }
         var req = URLRequest(url: url, timeoutInterval: 1.2)
         req.setValue("close", forHTTPHeaderField: "Connection")
         let sem = DispatchSemaphore(value: 0)
-        var healthy = false
-        URLSession.shared.dataTask(with: req) { data, resp, _ in
+        var ok = false
+        var reason = "no-response"
+        URLSession.shared.dataTask(with: req) { data, resp, err in
             defer { sem.signal() }
-            guard let http = resp as? HTTPURLResponse, http.statusCode == 200, let data, !data.isEmpty else {
+            if let err {
+                let ns = err as NSError
+                if ns.domain == NSURLErrorDomain, ns.code == NSURLErrorCannotConnectToHost
+                    || ns.code == NSURLErrorNetworkConnectionLost {
+                    reason = "conn-refused"
+                } else {
+                    reason = "err-\(ns.code)"
+                }
+                return
+            }
+            guard let http = resp as? HTTPURLResponse else {
+                reason = "no-http"
+                return
+            }
+            guard http.statusCode == 200, let data, !data.isEmpty else {
+                reason = "http-\(http.statusCode)"
                 return
             }
             guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                reason = "bad-json"
                 return
             }
-            // 避免把 Direct 等其它占口进程当成我们的 Helper
             let proto = (obj["protocol"] as? String) ?? ""
-            if proto != "lan-phonebase" { return }
+            if proto != "lan-phonebase" {
+                reason = "bad-proto:\(proto.isEmpty ? "?" : proto)"
+                return
+            }
             if expectVersion.isEmpty || expectVersion == "pending" {
-                healthy = true
+                ok = true
+                reason = "ok"
                 return
             }
             let release = obj["release"] as? [String: Any]
             let ver = (release?["version"] as? String) ?? ""
-            // 有明确期望版本时，缺版本字段不能算通过（否则旧/外来进程会挡住替换）
-            guard !ver.isEmpty else { return }
-            healthy = TipaSelfUpdate.cmpVer(ver, expectVersion) >= 0
+            guard !ver.isEmpty else {
+                reason = "no-version"
+                return
+            }
+            if TipaSelfUpdate.cmpVer(ver, expectVersion) >= 0 {
+                ok = true
+                reason = "ok"
+            } else {
+                reason = "ver-\(ver)<\(expectVersion)"
+            }
         }.resume()
         _ = sem.wait(timeout: .now() + 1.8)
-        return healthy
+        return (ok, reason)
     }
 
     private static func cStringArray(_ strings: [String]) -> [UnsafeMutablePointer<CChar>?] {

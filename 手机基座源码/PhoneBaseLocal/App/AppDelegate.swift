@@ -31,6 +31,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     func applicationDidEnterBackground(_ application: UIApplication) {
         AppRunLog.shared.append("主 UI 进入后台")
         BackgroundKeepAlive.shared.start()
+        // 主进程兜底听口时立刻交回 Helper，避免 UI 被杀带走 11019
+        if ServiceGateway.shared.isInProcess {
+            DispatchQueue.global(qos: .userInitiated).async {
+                ServiceGateway.shared.tryHandoffToHelper(reason: "enter-background")
+            }
+        }
     }
 
     func applicationWillTerminate(_ application: UIApplication) {

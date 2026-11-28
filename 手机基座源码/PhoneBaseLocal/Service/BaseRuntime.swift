@@ -192,7 +192,7 @@ final class BaseRuntime {
         if already {
             return
         }
-        notify("内存偏高 · 已压画质(有效档) 20fps/2Mbps/720 footprint=\(bytes)")
+        notify("内存偏高 · 已压画质(有效档) 30fps/3Mbps/720 footprint=\(bytes)")
         releaseUnusedMemory(reason: "trim")
         memHardStreak = 0
     }

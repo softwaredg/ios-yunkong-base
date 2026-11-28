@@ -197,7 +197,10 @@ final class VideoSettingsStore {
     @discardableResult
     func apply(_ next: VideoStreamProfile) -> VideoStreamProfile {
         lock.lock()
-        let mbps = clamp(next.bitrateMbps, minBitrateMbps, maxBitrateMbps)
+        // 用 bitrateBps 落盘，避免 bitrateMbps(Int 四舍五入) 把 4.5M 抬成 5M
+        let minBps = minBitrateMbps * 1_000_000
+        let maxBps = maxBitrateMbps * 1_000_000
+        let bps = clamp(next.bitrateBps, minBps, maxBps)
         let fps = clamp(next.frameRate, 5, maxFrameRate)
         if next.frameRate > 0 {
             requestedFrameRate = fps
@@ -213,7 +216,7 @@ final class VideoSettingsStore {
             profile: "foreground",
             maxDimension: dim,
             frameRate: fps,
-            bitrateBps: mbps * 1_000_000
+            bitrateBps: bps
         )
         generation += 1
         persistLocked()
@@ -254,8 +257,8 @@ final class VideoSettingsStore {
             base = VideoStreamProfile(
                 profile: "foreground",
                 maxDimension: dim,
-                frameRate: min(base.frameRate, 20),
-                bitrateBps: min(base.bitrateBps, 2_000_000)
+                frameRate: min(base.frameRate, 30),
+                bitrateBps: min(base.bitrateBps, 3_000_000)
             )
         }
         let br = max(400_000, base.bitrateBps * networkBitratePermille / 1000)
