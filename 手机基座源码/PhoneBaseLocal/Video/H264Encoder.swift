@@ -83,10 +83,11 @@ final class H264Encoder {
         }
     }
 
-    /// AverageBitRate + DataRateLimits。峰值按 2×/1s（勿用 1×：RealTime 会长期吃到一半左右）
+    /// RealTime 实测常只有设定一半；Average 用 2×、峰值再 2×，让 HUD 贴近用户档
     private func applyBitrateLocked(_ sess: VTCompressionSession, bitrateBps: Int) {
-        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrateBps as CFNumber)
-        let limits: [NSNumber] = [NSNumber(value: bitrateBps / 4), NSNumber(value: 1)]
+        let avg = bitrateBps * 2
+        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: avg as CFNumber)
+        let limits: [NSNumber] = [NSNumber(value: avg / 4), NSNumber(value: 1)]
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
     }
 
@@ -199,7 +200,8 @@ final class H264Encoder {
         // 官方 PBVideoEncoder：RealTime + 不重排 + MaxFrameDelayCount=0
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
+        // Main：同码率更清晰；已关 B 帧重排，解码无额外依赖
+        VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Main_AutoLevel)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
         applyBitrateLocked(sess, bitrateBps: bitrateBps)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: frameRate as CFNumber)
@@ -221,8 +223,8 @@ final class H264Encoder {
         recreateNeeded = false
         ready = true
         NSLog(
-            "[H264] encoder ready %dx%d br=%d fps=%d gop=1s dataRateLimits=%dB/1s",
-            width, height, bitrateBps, frameRate, bitrateBps / 4
+            "[H264] encoder ready %dx%d br=%d avg=%d fps=%d gop=1s peak=%dB/1s",
+            width, height, bitrateBps, bitrateBps * 2, frameRate, bitrateBps / 2
         )
     }
 
