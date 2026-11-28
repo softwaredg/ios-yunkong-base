@@ -83,9 +83,9 @@ final class H264Encoder {
         }
     }
 
-    /// RealTime 实测常只有设定一半；Average 用 2×、峰值再 2×，让 HUD 贴近用户档
+    /// RealTime 易吃不满；Average 1.5× + 峰值 2×（相对 avg），贴近设定又不猛冲
     private func applyBitrateLocked(_ sess: VTCompressionSession, bitrateBps: Int) {
-        let avg = bitrateBps * 2
+        let avg = bitrateBps + bitrateBps / 2
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: avg as CFNumber)
         let limits: [NSNumber] = [NSNumber(value: avg / 4), NSNumber(value: 1)]
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
@@ -224,7 +224,7 @@ final class H264Encoder {
         ready = true
         NSLog(
             "[H264] encoder ready %dx%d br=%d avg=%d fps=%d gop=1s peak=%dB/1s",
-            width, height, bitrateBps, bitrateBps * 2, frameRate, bitrateBps / 2
+            width, height, bitrateBps, bitrateBps + bitrateBps / 2, frameRate, (bitrateBps + bitrateBps / 2) / 4
         )
     }
 

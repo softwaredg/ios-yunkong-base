@@ -78,6 +78,7 @@ final class FramePublisher {
         let encoder: H264Encoder
         var lastConfig: Data?
         var lastEmitSerial: Int64 = 0
+        var lastEmitAt: CFAbsoluteTime = 0
         private(set) var started = false
         weak var owner: FramePublisher?
 
@@ -203,11 +204,13 @@ final class FramePublisher {
                 let existed = lanes[key] != nil
                 guard let lane = lanes[key] ?? ensureLaneLocked(group[0].profile) else { continue }
                 if !existed { toStart.append(lane) }
-                // serial = 已接受采集帧，不是理想 60Hz tick
+                // 按设定 fps 限时出帧（采集 40Hz 时 stride=1 会编到 40，超设定）
                 let fps = max(5, lane.profile.frameRate)
-                let stride = Self.encodeStride(sourceHz: measuredInputHz, encodeFps: fps)
-                let due = serial - lane.lastEmitSerial >= Int64(stride) || lane.lastEmitSerial == 0
+                let now = CFAbsoluteTimeGetCurrent()
+                let minGap = 1.0 / Double(fps)
+                let due = lane.lastEmitAt == 0 || (now - lane.lastEmitAt) >= minGap
                 if due {
+                    lane.lastEmitAt = now
                     lane.lastEmitSerial = serial
                     work.append(lane)
                 }
