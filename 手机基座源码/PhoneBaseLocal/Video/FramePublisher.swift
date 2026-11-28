@@ -13,6 +13,10 @@ final class FramePublisher {
     private var frameSerial: Int64 = 0
     private var pendingEncode: (CVPixelBuffer, CMTime)?
     private var encodeScheduled = false
+    /// 近 1s 采集入帧率；0=尚未测到。抽帧按此算，勿写死 60（实测常 ~40 → stride2 变 20fps）
+    private var measuredInputHz: Double = 0
+    private var inputRateWindowStart: CFAbsoluteTime = 0
+    private var inputRateCount: Int = 0
     var onTimestampUs: ((UInt64) -> Void)?
 
     /// 兼容 info.encoder；tryLock 避免与 encode 死锁堵死 /api/info
@@ -26,6 +30,7 @@ final class FramePublisher {
             s["lane"] = lane.profile.key
             s["clients"] = clients.count
             s["lanes"] = lanes.count
+            s["inputHz"] = measuredInputHz
             return s
         }
         return [
@@ -190,6 +195,7 @@ final class FramePublisher {
             pendingEncode = nil
             frameSerial += 1
             let serial = frameSerial
+            noteInputFrameLocked()
             let active = Dictionary(grouping: clients, by: { $0.profile.key })
             var work: [Lane] = []
             var toStart: [Lane] = []
@@ -197,9 +203,9 @@ final class FramePublisher {
                 let existed = lanes[key] != nil
                 guard let lane = lanes[key] ?? ensureLaneLocked(group[0].profile) else { continue }
                 if !existed { toStart.append(lane) }
-                // serial 随采集帧递增；采集已固定约 60Hz（见 syncCaptureRateFromSettings）。
+                // serial = 已接受采集帧，不是理想 60Hz tick
                 let fps = max(5, lane.profile.frameRate)
-                let stride = max(1, Int((60.0 / Double(fps)).rounded()))
+                let stride = Self.encodeStride(sourceHz: measuredInputHz, encodeFps: fps)
                 let due = serial - lane.lastEmitSerial >= Int64(stride) || lane.lastEmitSerial == 0
                 if due {
                     lane.lastEmitSerial = serial
@@ -235,6 +241,25 @@ final class FramePublisher {
                 lane.encoder.encode(buffer: buf, presentationTime: presentationTime)
             }
         }
+    }
+
+    private func noteInputFrameLocked() {
+        let now = CFAbsoluteTimeGetCurrent()
+        if inputRateWindowStart == 0 { inputRateWindowStart = now }
+        inputRateCount += 1
+        let elapsed = now - inputRateWindowStart
+        if elapsed >= 1.0 {
+            measuredInputHz = Double(inputRateCount) / elapsed
+            inputRateWindowStart = now
+            inputRateCount = 0
+        }
+    }
+
+    /// sourceHz=0（未测到）时 stride=1，避免冷启动按 60 误抽半帧
+    static func encodeStride(sourceHz: Double, encodeFps: Int) -> Int {
+        let fps = max(5, encodeFps)
+        guard sourceHz > 1 else { return 1 }
+        return max(1, Int((sourceHz / Double(fps)).rounded()))
     }
 
     func requestKeyframe() {
