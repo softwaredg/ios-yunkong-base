@@ -129,7 +129,8 @@ enum HelperLauncher {
             postUpdate: false,
             expectVersion: "pending",
             waitHealthy: waitHealthy,
-            healthyTimeoutSec: waitHealthy ? 8 : 5,
+            // 硬移交必须秒级失败回退，避免主进程挂起后数小时才记超时空窗
+            healthyTimeoutSec: waitHealthy ? 5 : 5,
             killIfUnhealthy: !waitHealthy
         )
     }
@@ -249,18 +250,26 @@ enum HelperLauncher {
                 AppRunLog.shared.append("Helper pid=\(pid) 已退出，健康检查中止")
                 return false
             }
+            // 主进程仍占口时 Helper 不可能听上：立刻失败，交给调用方软续服
             if BaseRuntime.shared.isRunning {
-                usleep(300_000)
-                continue
+                AppRunLog.shared.append(
+                    "Helper 健康检查中止：主进程仍在听口 pid=\(pid) expect=\(probeExpect.isEmpty ? "any" : probeExpect)"
+                )
+                if killIfUnhealthy {
+                    kill(pid, SIGTERM)
+                    usleep(50_000)
+                    kill(pid, SIGKILL)
+                }
+                return false
             }
             if tipaHealthy(expectVersion: probeExpect) {
                 return true
             }
-            usleep(300_000)
+            usleep(200_000)
         }
         let alive = kill(pid, 0) == 0
         AppRunLog.shared.append(
-            "Helper 已 spawn，但健康检查超时 expect=\(probeExpect.isEmpty ? "any" : probeExpect) alive=\(alive ? 1 : 0) kill=\(killIfUnhealthy ? 1 : 0)"
+            "Helper 已 spawn，但健康检查超时 expect=\(probeExpect.isEmpty ? "any" : probeExpect) alive=\(alive ? 1 : 0) kill=\(killIfUnhealthy ? 1 : 0) wallSec=\(Int(timeout))"
         )
         // 硬退移交失败时留给调用方 terminate+主进程续服，避免此处误杀后口空窗
         if alive, killIfUnhealthy {

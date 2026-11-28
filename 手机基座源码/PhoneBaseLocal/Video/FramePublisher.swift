@@ -25,6 +25,7 @@ final class FramePublisher {
             var s = lane.encoder.stats
             s["lane"] = lane.profile.key
             s["clients"] = clients.count
+            s["lanes"] = lanes.count
             return s
         }
         return [
@@ -32,7 +33,15 @@ final class FramePublisher {
             "width": sourceW,
             "height": sourceH,
             "clients": clients.count,
+            "lanes": lanes.count,
         ]
+    }
+
+    /// 内存诊断：视频 client / lane 计数（tryLock，忙则返回 -1）
+    var sessionCounts: (clients: Int, lanes: Int) {
+        guard lock.`try`() else { return (-1, -1) }
+        defer { lock.unlock() }
+        return (clients.count, lanes.count)
     }
 
     private final class Client {
@@ -179,6 +188,7 @@ final class FramePublisher {
                 let existed = lanes[key] != nil
                 guard let lane = lanes[key] ?? ensureLaneLocked(group[0].profile) else { continue }
                 if !existed { toStart.append(lane) }
+                // serial 随采集帧递增；采集已固定约 60Hz（见 syncCaptureRateFromSettings）。
                 let fps = max(5, lane.profile.frameRate)
                 let stride = max(1, Int((60.0 / Double(fps)).rounded()))
                 let due = serial - lane.lastEmitSerial >= Int64(stride) || lane.lastEmitSerial == 0
@@ -267,12 +277,19 @@ final class FramePublisher {
     func applyDefaultsFromSettings() {
         let d = VideoSettingsStore.shared.defaults
         lock.lock()
+        var needRecycle = false
         for c in clients where !c.profile.isWall {
+            if c.profile.key != d.key { needRecycle = true }
             c.profile = d
         }
+        for lane in lanes.values where !lane.profile.isWall {
+            if lane.profile.key != d.key { needRecycle = true }
+        }
         lock.unlock()
-        // 用户改 /api/video-settings：重建前景车道（profile.key 含码率/帧率）
-        recycleEncoder(reason: "video-settings")
+        // 参数未变则不重建编码器（避免画质风暴）
+        if needRecycle {
+            recycleEncoder(reason: "video-settings")
+        }
     }
 
     /// ABR 热更新：前景跟 settings；墙流按自身档位 × permille（小窗背压也要降峰）

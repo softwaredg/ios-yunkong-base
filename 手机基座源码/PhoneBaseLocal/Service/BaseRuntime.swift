@@ -33,10 +33,13 @@ final class BaseRuntime {
     /// 探活会狂 accept：运行日志按 key 强节流；日常 HTTP 探测不再逐条记
     private var lastConnLogAt: [String: Date] = [:]
     private let connLogMinInterval: TimeInterval = 120
-    /// memory-guard 硬重启连击：达到阈值则 hard exit，交给 ProcessWatchdog
+    /// memory-guard 软续服连击：多次仍超硬阈才硬退；≥800MB 一票否决
     private var memHardStreak = 0
+    private let memSoftBeforeHard = 5
     /// ≥800MB 一票否决：跳过软重启直接硬退
     private let memVetoBytes: UInt64 = 800 * 1024 * 1024
+    private var memMetricsTimer: DispatchSourceTimer?
+    private var lastMemMetricsAt: Date?
 
     private init() {
         let size = DeviceIdentity.screenSize()
@@ -153,7 +156,30 @@ final class BaseRuntime {
             MemoryGuard.shared.setTrimmedForPressure(true)
         }
         syncCaptureRateFromSettings()
+        startMemMetricsTimer()
         InterfaceOrientationWatch.bootstrap()
+    }
+
+    /// 长连诊断：clients/lanes/footprint，便于确认泄漏是否收敛
+    private func startMemMetricsTimer() {
+        if memMetricsTimer != nil { return }
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + 60, repeating: 60)
+        t.setEventHandler { [weak self] in self?.logMemMetricsIfDue() }
+        t.resume()
+        memMetricsTimer = t
+    }
+
+    private func logMemMetricsIfDue() {
+        guard isRunning else { return }
+        let now = Date()
+        if let last = lastMemMetricsAt, now.timeIntervalSince(last) < 60 { return }
+        lastMemMetricsAt = now
+        let counts = publisher.sessionCounts
+        let fp = MemoryGuard.physFootprint()
+        AppRunLog.shared.append(
+            "mem · footprint=\(fp) clients=\(counts.clients) lanes=\(counts.lanes) poolBusy=\(capture.poolBusySkips)"
+        )
     }
 
     /// 样板 trimmedForPressure：只压有效档一次，不刷 soft 日志。
@@ -190,7 +216,9 @@ final class BaseRuntime {
     }
 
     private func syncCaptureRateFromSettings() {
-        capture.setTargetFrameRate(VideoSettingsStore.shared.defaults.frameRate)
+        // 采集固定 60Hz；各路编码在 FramePublisher 按 lane.frameRate 对 60 抽帧。
+        // 若采集也跟 settings 限到 30，再 stride=60/30，大窗会变成约 15fps（实测 ~12）。
+        capture.setTargetFrameRate(60)
     }
 
     private var trimmedForPressure: Bool {
@@ -207,21 +235,29 @@ final class BaseRuntime {
 
     private func hardExitForMemory(bytes: UInt64, reason: String) {
         MemoryGuard.shared.markRestarting()
-        notify("内存仍高 · 硬重启并由看门狗拉起 footprint=\(bytes) reason=\(reason)")
+        notify(
+            "内存仍高 · 硬重启并由看门狗拉起 footprint=\(bytes) reason=\(reason) streak=\(memHardStreak)"
+        )
         MemoryGuard.shared.noteRestart(reason: reason)
         // 对齐样板 scheduleRestart → 听口完成再 shutdownWithCode：
         // 必须等 Helper 真正听 11019 再 exit；失败则清掉僵 Helper，主进程续服（勿盲退留空窗）。
         let handed = ProcessWatchdog.spawnDeferredRelaunch(delayMs: 800, waitHealthy: true)
         if handed {
-            AppRunLog.shared.append("硬重启移交成功 · Helper 已听 11019 · 主进程退出 reason=\(reason)")
+            AppRunLog.shared.append(
+                "硬重启移交成功 · Helper 已听 11019 · 主进程退出 reason=\(reason) footprint=\(bytes)"
+            )
             AppRunLog.shared.flush()
             exit(0)
         }
-        AppRunLog.shared.append("硬重启移交失败 · 主进程软恢复续服 reason=\(reason)")
+        let tipaOk = HelperLauncher.tipaHealthy(expectVersion: "")
+        AppRunLog.shared.append(
+            "硬重启移交失败 · 主进程软恢复续服 reason=\(reason) footprint=\(bytes) streak=\(memHardStreak) tipaHealthy=\(tipaOk ? 1 : 0)"
+        )
         AppRunLog.shared.flush()
         HelperLauncher.terminateHelper()
         usleep(200_000)
         MemoryGuard.shared.markWaitingIdle()
+        memHardStreak = 0
         if isRunning {
             _ = softRestart(reason: "memory-guard-hard-fallback", note: false)
         } else {
@@ -230,7 +266,7 @@ final class BaseRuntime {
         }
     }
 
-    /// 硬阈：release → waiting-idle（触控中）→ 仍超则 hard exit。
+    /// 硬阈：release 软续服（不断听口）→ 多次仍超 / 800MB veto 才硬退。
     private func handleMemoryHard(bytes: UInt64) {
         if !VideoSettingsStore.shared.isPressureTrimmed {
             handleMemoryTrim(bytes: bytes)
@@ -246,12 +282,21 @@ final class BaseRuntime {
         memHardStreak += 1
         releaseUnusedMemory(reason: "memory-guard")
         let after = MemoryGuard.physFootprint()
-        if after >= MemoryGuard.shared.memoryLimitBytes || memHardStreak >= 2 {
-            hardExitForMemory(bytes: after, reason: "memory-guard-hard")
+        if after >= memVetoBytes {
+            hardExitForMemory(bytes: after, reason: "memory-guard-veto-800")
             return
         }
+        // 软续服优先：拆池/重建编码器但保持 HTTP/WS，避免客户长空窗
         MemoryGuard.shared.noteRestart(reason: "memory-guard-soft-ok")
-        notify("已重启 · memory-guard · footprint=\(bytes)→\(after) streak=\(memHardStreak)")
+        notify("已软续服 · memory-guard · footprint=\(bytes)→\(after) streak=\(memHardStreak)")
+        logMemMetricsIfDue()
+        if after < MemoryGuard.shared.memoryLimitBytes {
+            memHardStreak = 0
+            return
+        }
+        if memHardStreak >= memSoftBeforeHard {
+            hardExitForMemory(bytes: after, reason: "memory-guard-hard")
+        }
     }
 
     private func handleRunLog(method: String, path: String) -> Data {
@@ -297,14 +342,22 @@ final class BaseRuntime {
             out["footprint"] = fp
             return (try? JSONSerialization.data(withJSONObject: out)) ?? Data(#"{"ok":false}"#.utf8)
         }
+        let prev = VideoSettingsStore.shared.defaults
         let applied = VideoSettingsStore.shared.apply(next)
-        DispatchQueue.main.async { [weak self] in
-            self?.publisher.applyDefaultsFromSettings()
-            self?.syncCaptureRateFromSettings()
-            self?.notify("画质已更新 · \(applied.frameRate)fps · \(applied.bitrateBps / 1000)kbps")
+        let unchanged =
+            applied.frameRate == prev.frameRate
+            && applied.bitrateBps == prev.bitrateBps
+            && applied.maxDimension == prev.maxDimension
+        if !unchanged {
+            DispatchQueue.main.async { [weak self] in
+                self?.publisher.applyDefaultsFromSettings()
+                self?.syncCaptureRateFromSettings()
+                self?.notify("画质已更新 · \(applied.frameRate)fps · \(applied.bitrateBps / 1000)kbps")
+            }
         }
         var out = VideoSettingsStore.shared.status
         out["ok"] = true
+        out["unchanged"] = unchanged
         return (try? JSONSerialization.data(withJSONObject: out)) ?? Data(#"{"ok":true}"#.utf8)
     }
 
