@@ -182,11 +182,17 @@ enum HelperLauncher {
         }
         envList.append("\(ProcessRole.roleKey)=helper")
         envList.append("\(ProcessRole.parentKey)=\(getpid())")
-        // 钉死主容器 HOME，避免 Helper 读不到 should-serve / 日志写到别处
-        if let home = ProcessRole.dataHomePath, !home.isEmpty {
+        // 钉死主容器 HOME（优先 Library 上一级，避免 TrollStore 下 HOME=/var/mobile）
+        let containerHome: String = {
+            if let lib = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first {
+                return lib.deletingLastPathComponent().path
+            }
+            return ProcessRole.dataHomePath ?? ""
+        }()
+        if !containerHome.isEmpty {
             envList.removeAll { $0.hasPrefix("HOME=") }
-            envList.append("HOME=\(home)")
-            envList.append("\(ProcessRole.homeKey)=\(home)")
+            envList.append("HOME=\(containerHome)")
+            envList.append("\(ProcessRole.homeKey)=\(containerHome)")
         }
         if postUpdate {
             envList.append("\(ProcessRole.postUpdateKey)=1")

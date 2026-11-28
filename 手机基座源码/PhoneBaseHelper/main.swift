@@ -4,7 +4,7 @@ import Darwin
 
 /// 入口分流：
 /// - uid=0（persona root，装 tipa 武装）：不进 UIKit，只跑 Supervisor 装后拉起（样板同款）
-/// - 日常 Helper：走 UIApplication + 开服
+/// - 日常 Helper：先同步开服，再进 UIApplication（embedded 二进制上 didFinishLaunching 常不来）
 setenv("PHONEBASE_ROLE", "helper", 1)
 
 if getuid() == 0 {
@@ -18,7 +18,17 @@ if getuid() == 0 {
     AppRunLog.shared.append(
         "Helper mobile 入口 → UIKit forceServe=\(ProcessRole.forceServe ? 1 : 0) home=\(ProcessRole.dataHomePath ?? "?")"
     )
-    AppRunLog.shared.flush()
+    let shouldListen = ProcessRole.forceServe || ServeIntent.shouldServe || UpdateMarker.exists
+    if shouldListen {
+        HelperSupervisor.shared.start()
+        // 必须在 UIApplicationMain 之前同步听口：日志里从未出现「Helper 进程启动」= delegate 没跑到
+        let ok = BaseRuntime.shared.start(notifyStatus: true)
+        AppRunLog.shared.append(ok ? "Helper 预开服成功（UIKit前）" : "Helper 预开服失败（UIKit前）")
+        AppRunLog.shared.flush()
+    } else {
+        AppRunLog.shared.append("Helper mobile 入口 · 应开服=0，跳过预开服")
+        AppRunLog.shared.flush()
+    }
     UIApplicationMain(
         CommandLine.argc,
         CommandLine.unsafeArgv,

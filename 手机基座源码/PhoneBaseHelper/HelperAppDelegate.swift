@@ -24,29 +24,24 @@ final class HelperAppDelegate: UIResponder, UIApplicationDelegate {
         window.isHidden = true
         self.window = window
 
-        // 先落盘：证明 Helper 已起来；装后拉起不依赖开服成败
         AppRunLog.shared.append(
-            "Helper 进程启动 uid=\(getuid()) marker=\(UpdateMarker.exists ? 1 : 0) postUpdate=\(ProcessRole.postUpdateArmed ? 1 : 0)"
+            "Helper UIKit 起来 uid=\(getuid()) running=\(BaseRuntime.shared.isRunning ? 1 : 0) marker=\(UpdateMarker.exists ? 1 : 0)"
         )
         HelperSupervisor.shared.start()
-        // 用户已停止则只挂 Supervisor，不开服（FORCE_SERVE 时 must listen）
+        // main.swift 已预开服成功则只挂 KeepAlive
+        if BaseRuntime.shared.isRunning {
+            AppRunLog.shared.append("Helper 服务已在听（预开服）")
+            return true
+        }
         if !ServeIntent.shouldServe, !UpdateMarker.exists, !ProcessRole.forceServe {
-            AppRunLog.shared.append("Helper 进程启动 · 应开服=0，跳过听口")
+            AppRunLog.shared.append("Helper UIKit · 应开服=0，跳过听口")
             AppRunLog.shared.flush()
             return true
         }
-        // 必须同步开服：posix_spawn 出来的进程 main.async 常迟迟不跑，会出现 alive 但 11019 无响应
         let ok = BaseRuntime.shared.start(notifyStatus: true)
         NSLog("[Helper] BaseRuntime start ok=%d", ok ? 1 : 0)
         AppRunLog.shared.append(ok ? "Helper 服务已启动（常驻）" : "Helper 服务启动失败")
-        if !ok {
-            DispatchQueue.main.async {
-                if !BaseRuntime.shared.isRunning, ServeIntent.shouldServe || UpdateMarker.exists {
-                    let again = BaseRuntime.shared.start(notifyStatus: true)
-                    NSLog("[Helper] BaseRuntime retry ok=%d", again ? 1 : 0)
-                }
-            }
-        }
+        AppRunLog.shared.flush()
         return true
     }
 

@@ -177,8 +177,7 @@ final class ServiceGateway {
         if isStale(myEpoch) { return false }
 
         if commitInProcessFallback(epoch: myEpoch) {
-            // 仅尝试一次交回；失败不重试，避免 Helper 坏时反复停主口
-            scheduleHandoffToHelper(delaySec: 8, reason: "after-fallback")
+            // Helper 刚失败：勿自动交回（会停掉已通的主进程听口，造成投屏中断）
             return true
         }
 
