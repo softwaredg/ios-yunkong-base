@@ -78,7 +78,8 @@ final class FramePublisher {
         let encoder: H264Encoder
         var lastConfig: Data?
         var lastEmitSerial: Int64 = 0
-        var lastEmitAt: CFAbsoluteTime = 0
+        /// 比例攒帧：采集略高于设定时，用时间间隙会隔帧掉到一半（37Hz→~20）
+        var emitAccum: Double = 0
         private(set) var started = false
         weak var owner: FramePublisher?
 
@@ -204,13 +205,14 @@ final class FramePublisher {
                 let existed = lanes[key] != nil
                 guard let lane = lanes[key] ?? ensureLaneLocked(group[0].profile) else { continue }
                 if !existed { toStart.append(lane) }
-                // 按设定 fps 限时出帧（采集 40Hz 时 stride=1 会编到 40，超设定）
+                // 每采一帧加 encodeFps/sourceHz；满 1 出一帧 → 长期等于设定 fps
                 let fps = max(5, lane.profile.frameRate)
-                let now = CFAbsoluteTimeGetCurrent()
-                let minGap = 1.0 / Double(fps)
-                let due = lane.lastEmitAt == 0 || (now - lane.lastEmitAt) >= minGap
+                let src = measuredInputHz > 1 ? measuredInputHz : Double(fps)
+                lane.emitAccum += Double(fps) / src
+                let due = lane.lastEmitSerial == 0 || lane.emitAccum >= 1.0
                 if due {
-                    lane.lastEmitAt = now
+                    if lane.emitAccum >= 1.0 { lane.emitAccum -= 1.0 }
+                    else { lane.emitAccum = 0 }
                     lane.lastEmitSerial = serial
                     work.append(lane)
                 }
@@ -256,13 +258,6 @@ final class FramePublisher {
             inputRateWindowStart = now
             inputRateCount = 0
         }
-    }
-
-    /// sourceHz=0（未测到）时 stride=1，避免冷启动按 60 误抽半帧
-    static func encodeStride(sourceHz: Double, encodeFps: Int) -> Int {
-        let fps = max(5, encodeFps)
-        guard sourceHz > 1 else { return 1 }
-        return max(1, Int((sourceHz / Double(fps)).rounded()))
     }
 
     func requestKeyframe() {
