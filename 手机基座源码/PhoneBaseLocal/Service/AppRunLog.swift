@@ -57,6 +57,11 @@ final class AppRunLog {
         }
     }
 
+    /// 硬退出前立刻落盘，避免异步 debounce 被 exit 砍掉。
+    func flush() {
+        queue.sync { persistLockedNow() }
+    }
+
     private func appendLocked(_ message: String) {
         let stamp = formatter.string(from: Date())
         let chunks = message.split(separator: "\n", omittingEmptySubsequences: false)

@@ -118,12 +118,20 @@ enum HelperLauncher {
         }
     }
 
-    /// Helper 硬退出前：立刻再 spawn 替身（不写装后标记、不拉主 UI）。
+    /// Helper / 主进程硬退出前：再 spawn 替身（不写装后标记、不拉主 UI）。
+    /// 对齐样板 `scheduleRestart`→听口完成再 `shutdown`：waitHealthy 时必须 11019 通才算移交成功。
+    /// expectVersion=pending → 只校验 lan-phonebase，不卡版本字段（避免误杀刚起来的 Helper）。
     @discardableResult
-    static func spawnReplacementHelper() -> Bool {
+    static func spawnReplacementHelper(waitHealthy: Bool = false) -> Bool {
         gate.lock()
         defer { gate.unlock() }
-        return spawnHelper(postUpdate: false, expectVersion: "", waitHealthy: false)
+        return spawnHelper(
+            postUpdate: false,
+            expectVersion: "pending",
+            waitHealthy: waitHealthy,
+            healthyTimeoutSec: waitHealthy ? 8 : 5,
+            killIfUnhealthy: !waitHealthy
+        )
     }
 
     static func terminateHelper() {
@@ -145,7 +153,13 @@ enum HelperLauncher {
     }
 
     @discardableResult
-    private static func spawnHelper(postUpdate: Bool, expectVersion: String, waitHealthy: Bool) -> Bool {
+    private static func spawnHelper(
+        postUpdate: Bool,
+        expectVersion: String,
+        waitHealthy: Bool,
+        healthyTimeoutSec: TimeInterval = 5,
+        killIfUnhealthy: Bool = true
+    ) -> Bool {
         guard let exec = helperPath, FileManager.default.isExecutableFile(atPath: exec)
                 || FileManager.default.fileExists(atPath: exec)
         else {
@@ -222,13 +236,14 @@ enum HelperLauncher {
             return false
         }
 
-        // 日常 ensure：按版本探活；僵死则杀掉
+        // 日常 ensure：按版本探活；硬退移交（pending）只要求协议通。
         let probeExpect: String = {
             if expectVersion == "pending" { return "" }
             if expectVersion.isEmpty { return TipaSelfUpdate.localVersion }
             return expectVersion
         }()
-        let deadline = Date().addingTimeInterval(5)
+        let timeout = max(2, healthyTimeoutSec)
+        let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if kill(pid, 0) != 0 {
                 AppRunLog.shared.append("Helper pid=\(pid) 已退出，健康检查中止")
@@ -245,9 +260,10 @@ enum HelperLauncher {
         }
         let alive = kill(pid, 0) == 0
         AppRunLog.shared.append(
-            "Helper 已 spawn，但健康检查超时 expect=\(probeExpect.isEmpty ? "any" : probeExpect) alive=\(alive ? 1 : 0)"
+            "Helper 已 spawn，但健康检查超时 expect=\(probeExpect.isEmpty ? "any" : probeExpect) alive=\(alive ? 1 : 0) kill=\(killIfUnhealthy ? 1 : 0)"
         )
-        if alive {
+        // 硬退移交失败时留给调用方 terminate+主进程续服，避免此处误杀后口空窗
+        if alive, killIfUnhealthy {
             kill(pid, SIGTERM)
             usleep(50_000)
             kill(pid, SIGKILL)

@@ -209,9 +209,24 @@ final class BaseRuntime {
         MemoryGuard.shared.markRestarting()
         notify("内存仍高 · 硬重启并由看门狗拉起 footprint=\(bytes) reason=\(reason)")
         MemoryGuard.shared.noteRestart(reason: reason)
-        ProcessWatchdog.spawnDeferredRelaunch(delayMs: 1500)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+        // 对齐样板 scheduleRestart → 听口完成再 shutdownWithCode：
+        // 必须等 Helper 真正听 11019 再 exit；失败则清掉僵 Helper，主进程续服（勿盲退留空窗）。
+        let handed = ProcessWatchdog.spawnDeferredRelaunch(delayMs: 800, waitHealthy: true)
+        if handed {
+            AppRunLog.shared.append("硬重启移交成功 · Helper 已听 11019 · 主进程退出 reason=\(reason)")
+            AppRunLog.shared.flush()
             exit(0)
+        }
+        AppRunLog.shared.append("硬重启移交失败 · 主进程软恢复续服 reason=\(reason)")
+        AppRunLog.shared.flush()
+        HelperLauncher.terminateHelper()
+        usleep(200_000)
+        MemoryGuard.shared.markWaitingIdle()
+        if isRunning {
+            _ = softRestart(reason: "memory-guard-hard-fallback", note: false)
+        } else {
+            let ok = start(notifyStatus: true)
+            notify(ok ? "硬重启回退 · 主进程已续服" : "硬重启回退失败 · 请手动打开基座")
         }
     }
 
@@ -317,14 +332,25 @@ final class BaseRuntime {
             DispatchQueue.main.async { [weak self] in self?.stop() }
             return jsonOK(["action": "stop"])
         case "/api/control/restart":
-            // hard=1 → exit，由 ProcessWatchdog 拉起（对齐崩溃路径）
+            // hard=1 → 先把服务交给 Helper，确认听口后再 exit；失败则软恢复。
             if query["hard"] == "1" || query["mode"] == "hard" {
+                MemoryGuard.shared.markRestarting()
                 MemoryGuard.shared.noteRestart(reason: "control-hard")
-                ProcessWatchdog.spawnDeferredRelaunch(delayMs: 1200)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    exit(0)
+                let handed = ProcessWatchdog.spawnDeferredRelaunch(delayMs: 800, waitHealthy: true)
+                if handed {
+                    AppRunLog.shared.append("control-hard：Helper 已听口，主进程即将退出")
+                    AppRunLog.shared.flush()
+                    DispatchQueue.main.async { exit(0) }
+                    return jsonOK(["action": "restart", "mode": "hard", "handedOff": true])
                 }
-                return jsonOK(["action": "restart", "mode": "hard"])
+                AppRunLog.shared.append("control-hard：Helper 未就绪，改为软重启")
+                HelperLauncher.terminateHelper()
+                usleep(200_000)
+                MemoryGuard.shared.markWaitingIdle()
+                DispatchQueue.main.async { [weak self] in
+                    _ = self?.softRestart(reason: "control-hard-fallback")
+                }
+                return jsonOK(["action": "restart", "mode": "soft", "handedOff": false])
             }
             DispatchQueue.main.async { [weak self] in
                 _ = self?.softRestart(reason: "control")

@@ -12,11 +12,13 @@ enum ProcessWatchdog {
 
     /// BaseRuntime 硬退出前调用（内存守卫 / control hard）。
     /// Helper：拉替身续服。主进程：先停听再 spawn Helper（否则口被本进程占着 Helper 绑不上）。
-    static func spawnDeferredRelaunch(delayMs: UInt32 = 1500) {
+    /// - Returns: Helper 是否已在 11019 健康听口（waitHealthy 时）；失败则调用方应软恢复，勿盲目 exit。
+    @discardableResult
+    static func spawnDeferredRelaunch(delayMs: UInt32 = 1500, waitHealthy: Bool = true) -> Bool {
         if ProcessRole.isHelper {
-            _ = HelperLauncher.spawnReplacementHelper()
-            if delayMs > 0 { usleep(delayMs * 1000) }
-            return
+            let ok = HelperLauncher.spawnReplacementHelper(waitHealthy: waitHealthy)
+            if !waitHealthy, delayMs > 0 { usleep(delayMs * 1000) }
+            return ok
         }
         if BaseRuntime.shared.isRunning {
             if Thread.isMainThread {
@@ -24,10 +26,16 @@ enum ProcessWatchdog {
             } else {
                 DispatchQueue.main.sync { BaseRuntime.shared.stop() }
             }
-            usleep(150_000)
+            // 给内核一点时间释放 11019，否则 Helper bind 失败后主进程又 exit → Wi‑Fi 整晚空窗
+            usleep(400_000)
         }
-        // 不等待健康：随后本进程会 exit，Helper 起来后自行占口
-        _ = HelperLauncher.spawnReplacementHelper()
-        if delayMs > 0 { usleep(delayMs * 1000) }
+        let ok = HelperLauncher.spawnReplacementHelper(waitHealthy: waitHealthy)
+        if !waitHealthy, delayMs > 0 { usleep(delayMs * 1000) }
+        if ok {
+            AppRunLog.shared.append("看门狗：Helper 已听口，可安全退出主进程")
+        } else {
+            AppRunLog.shared.append("看门狗：Helper 未就绪（waitHealthy=\(waitHealthy ? 1 : 0)）")
+        }
+        return ok
     }
 }

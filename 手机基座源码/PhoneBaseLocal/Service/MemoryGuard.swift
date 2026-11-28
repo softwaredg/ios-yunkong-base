@@ -30,8 +30,10 @@ final class MemoryGuard {
     private(set) var state = "normal"
     private var lastRestartAt: Date?
     private var trimArmedSince: TimeInterval?
-    /// 硬退已安排：避免 exit 前重复 onOverLimit
+    /// 硬退已安排：避免 exit 前重复 onOverLimit（对齐样板 `_restartScheduled`）
     private var restartScheduled = false
+    /// 已向主线程投递 onOverLimit，完成前勿重复投递
+    private var overLimitPosted = false
     private var timer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "cn.local.phonebase.memory-guard")
     private let overLimitGraceSec: TimeInterval = 3
@@ -137,12 +139,14 @@ final class MemoryGuard {
 
     func markWaitingIdle() {
         restartScheduled = false
+        overLimitPosted = false
         state = "waiting-idle"
         // 保留 overLimitSince，下一拍继续决策
     }
 
     func markRestarting() {
         restartScheduled = true
+        overLimitPosted = true
         state = "restarting"
     }
 
@@ -197,10 +201,17 @@ final class MemoryGuard {
                 state = "rate-limited"
                 return
             }
-            if restartScheduled { return }
+            if restartScheduled || overLimitPosted { return }
+            // 投递占坑（非 restartScheduled）：soft-ok / waiting-idle 仍可再次进入硬阈
+            overLimitPosted = true
             // 不清 overLimitSince：waiting-idle 时可再入；noteRestart / 降回时再清
             DispatchQueue.main.async { [weak self] in
-                self?.onOverLimit?(cur)
+                guard let self else { return }
+                self.onOverLimit?(cur)
+                // hardExit 会 markRestarting；未硬退则放开，允许后续 tick 再决策
+                if !self.restartScheduled {
+                    self.overLimitPosted = false
+                }
             }
             return
         }
