@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 import UIKit // mobile Helper 用 UIApplication.open；root 模式勿碰 UIApplication.shared
 
-/// 仅在 Helper 进程运行：监视主 App / 装后标记，负责把主 App 拉回前台。
+/// 仅在 Helper 进程运行：监视主 App / 装后标记；投屏由本进程 BaseRuntime 常驻。
 final class HelperSupervisor {
     static let shared = HelperSupervisor()
 
@@ -13,6 +13,8 @@ final class HelperSupervisor {
     private let windowSec: TimeInterval = 180
     /// 装后拉起最多 3 个窗口（约 3×(3s+3min)），避免失败后永久空转
     private let maxPullWindows = 3
+    private var lastUiPullAt: Date = .distantPast
+    private var uiPullPending = true
 
     func start() {
         guard ProcessRole.isHelper else { return }
@@ -33,7 +35,7 @@ final class HelperSupervisor {
             parent, UpdateMarker.exists ? 1 : 0, ProcessRole.expectVersion
         )
         while true {
-            // 只认标记文件：用户点「稍后」清标记后必须解除武装，避免普通退出被拉回
+            // 装后标记：父进程退出后拉主 UI 完成升级
             let shouldArm = UpdateMarker.exists
             if shouldArm && !armed {
                 armed = true
@@ -51,7 +53,6 @@ final class HelperSupervisor {
                 NSLog("[HelperSupervisor] pull main window=%d expect=%@", pullWindows, expect)
                 AppRunLog.shared.append("Supervisor 装后拉起 window=\(pullWindows) expect=\(expect)")
                 usleep(updateInitialDelayUs)
-                // 等待期间用户可能取消：再确认一次标记
                 guard UpdateMarker.exists else {
                     armed = false
                     pullWindows = 0
@@ -69,8 +70,21 @@ final class HelperSupervisor {
                     NSLog("[HelperSupervisor] window failed, will retry")
                     usleep(retryUs)
                 }
+                continue
             }
-            // 主 UI 普通退出：Helper 继续跑服务，不强行把 UI 拉回前台
+
+            // 日常：应开服且主 UI 不在 → 限频拉回界面（投屏已由 Helper 续服，不依赖主 UI）
+            if !armed, ServeIntent.shouldServe, !HelperLauncher.isMainAppAlive() {
+                if uiPullPending, Date().timeIntervalSince(lastUiPullAt) >= 60 {
+                    lastUiPullAt = Date()
+                    uiPullPending = false
+                    AppRunLog.shared.append("Supervisor：主 UI 不在，拉回界面（Helper 继续服役）")
+                    fireLaunchMain()
+                }
+            } else {
+                uiPullPending = true
+            }
+
             usleep(500_000)
         }
     }
@@ -82,15 +96,12 @@ final class HelperSupervisor {
         while Date() < deadline {
             n += 1
             fireLaunchMain()
-            // 装后本 Helper 仍是旧二进制，/api/info 版本会对不上 expect；
-            // 以主 UI 进程存活为准，再补一次 open 把界面拉到前台。
             if HelperLauncher.isMainAppAlive() {
                 usleep(800_000)
                 fireLaunchMain()
                 NSLog("[HelperSupervisor] main alive after %d expect=%@", n, expectVersion)
                 return true
             }
-            // 兜底：无版本要求的健康探活（主进程名枚举失败时）
             if n >= 2, HelperLauncher.tipaHealthy(expectVersion: "") {
                 fireLaunchMain()
             }
@@ -109,7 +120,6 @@ final class HelperSupervisor {
 
     private func openPhonebaseURL() {
         guard let url = URL(string: "phonebase://relaunch") else { return }
-        // root 拉起模式未跑 UIApplicationMain，禁止碰 UIApplication.shared
         if getuid() != 0 {
             let sem = DispatchSemaphore(value: 0)
             DispatchQueue.main.async {

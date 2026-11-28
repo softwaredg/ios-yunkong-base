@@ -1,7 +1,7 @@
 import Foundation
 import UIKit
 
-/// 主 UI 侧服务门面：日常优先主进程开服（可靠）；Helper 主要用于装后拉起。
+/// 主 UI 侧服务门面：对齐样板 — Helper 常驻听 11019；主进程仅兜底。
 final class ServiceGateway {
     static let shared = ServiceGateway()
 
@@ -29,6 +29,7 @@ final class ServiceGateway {
     private init() {}
 
     private static func helperServing() -> Bool {
+        // 主进程若自己占口，不能把本机探活当成 Helper
         if BaseRuntime.shared.isRunning { return false }
         return HelperLauncher.isHelperAlive() && HelperLauncher.tipaHealthy(expectVersion: "")
     }
@@ -68,7 +69,14 @@ final class ServiceGateway {
         lock.lock()
         let stopped = userStopped
         lock.unlock()
+        // 用户点过停止（flag 已清）则冷启动不自动开服；首次无 flag 仍开服
         if stopped { return }
+        if !ServeIntent.shouldServe {
+            // 无 flag：可能是首次，或用户停过。用「停过」哨兵文件区分。
+            if ServeIntent.userStoppedBefore {
+                return
+            }
+        }
         _ = start()
     }
 
@@ -79,6 +87,7 @@ final class ServiceGateway {
         epoch &+= 1
         let myEpoch = epoch
         lock.unlock()
+        ServeIntent.set(true)
         DispatchQueue.main.async { [weak self] in
             self?.onStatus?("正在启动服务…")
         }
@@ -95,20 +104,25 @@ final class ServiceGateway {
     private func startBlocking(epoch myEpoch: UInt64) -> Bool {
         if isStale(myEpoch) { return false }
 
-        // 日常投屏：主进程优先（Helper 在部分机型 posix_spawn 后进程活着但不听口）
-        if commitInProcessIfPossible(epoch: myEpoch) {
-            return true
+        // 主进程让出口，交给 Helper 常驻听 11019
+        if BaseRuntime.shared.isRunning {
+            AppRunLog.shared.append("开服：主进程让出口给 Helper")
+            if Thread.isMainThread {
+                BaseRuntime.shared.stop()
+            } else {
+                DispatchQueue.main.sync { BaseRuntime.shared.stop() }
+            }
+            usleep(200_000)
         }
         if isStale(myEpoch) { return false }
 
-        // 主进程失败时再试 Helper（短等）
         DispatchQueue.main.async { [weak self] in
-            self?.onStatus?("主进程未就绪，尝试 Helper…")
+            self?.onStatus?("正在拉起 Helper 服务…")
         }
         let helperOk = HelperLauncher.ensureRunning()
         if isStale(myEpoch) { return false }
 
-        let deadline = Date().addingTimeInterval(4)
+        let deadline = Date().addingTimeInterval(6)
         var healthy = Self.helperServing()
         while !healthy && Date() < deadline {
             if isStale(myEpoch) { return false }
@@ -127,7 +141,7 @@ final class ServiceGateway {
             usingInProcess = false
             lock.unlock()
             let status = "服务已启动（Helper）· 本机:\(port)"
-            AppRunLog.shared.append("用户启动服务 → Helper 就绪")
+            AppRunLog.shared.append("用户启动服务 → Helper 就绪（常驻）")
             DispatchQueue.main.async { [weak self] in self?.onStatus?(status) }
             return true
         }
@@ -135,41 +149,25 @@ final class ServiceGateway {
         if isStale(myEpoch) { return false }
 
         AppRunLog.shared.append(
-            "Helper 仍未就绪（spawn=\(helperOk ? "ok" : "fail") alive=\(HelperLauncher.isHelperAlive() ? 1 : 0)），再次主进程开服"
+            "Helper 未就绪（spawn=\(helperOk ? "ok" : "fail") alive=\(HelperLauncher.isHelperAlive() ? 1 : 0)），主进程兜底开服"
         )
         HelperLauncher.terminateHelper()
         usleep(150_000)
         if isStale(myEpoch) { return false }
 
-        if commitInProcessIfPossible(epoch: myEpoch, forceStart: true) {
+        if commitInProcessFallback(epoch: myEpoch) {
             return true
         }
 
         let status = "启动失败：无法监听 \(port)"
-        AppRunLog.shared.append("启动失败：主进程与 Helper 均未就绪")
+        AppRunLog.shared.append("启动失败：Helper 与主进程均未就绪")
         DispatchQueue.main.async { [weak self] in self?.onStatus?(status) }
         return false
     }
 
-    /// 主进程开服并提交状态。
+    /// 仅 Helper 起不来时兜底；会清 Helper 并由主进程占口。
     @discardableResult
-    private func commitInProcessIfPossible(epoch myEpoch: UInt64, forceStart: Bool = false) -> Bool {
-        if !forceStart, BaseRuntime.shared.isRunning {
-            lock.lock()
-            if userStopped || epoch != myEpoch {
-                lock.unlock()
-                return false
-            }
-            cachedRunning = true
-            usingInProcess = true
-            lock.unlock()
-            DispatchQueue.main.async { [weak self] in
-                self?.onStatus?("服务已启动（主进程）· 本机:\(self?.port ?? 11019)")
-            }
-            return true
-        }
-
-        // 清掉僵死 Helper，避免占口
+    private func commitInProcessFallback(epoch myEpoch: UInt64) -> Bool {
         if HelperLauncher.isHelperAlive() {
             HelperLauncher.terminateHelper()
             usleep(150_000)
@@ -204,9 +202,9 @@ final class ServiceGateway {
         lock.unlock()
 
         if localOk {
-            AppRunLog.shared.append("主进程 BaseRuntime 已启动")
+            AppRunLog.shared.append("主进程 BaseRuntime 兜底已启动")
             DispatchQueue.main.async { [weak self] in
-                self?.onStatus?("服务已启动（主进程）· 本机:\(self?.port ?? 11019)")
+                self?.onStatus?("服务已启动（主进程兜底）· 本机:\(self?.port ?? 11019)")
             }
         }
         return localOk
@@ -220,6 +218,7 @@ final class ServiceGateway {
 
     func stop() {
         AppRunLog.shared.append("用户停止服务")
+        ServeIntent.set(false)
         let stopEpoch: UInt64
         lock.lock()
         userStopped = true

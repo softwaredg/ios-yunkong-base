@@ -29,7 +29,13 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func applicationDidEnterBackground(_ application: UIApplication) {
+        AppRunLog.shared.append("主 UI 进入后台")
         BackgroundKeepAlive.shared.start()
+    }
+
+    func applicationWillTerminate(_ application: UIApplication) {
+        AppRunLog.shared.append("主 UI 即将退出")
+        AppRunLog.shared.flush()
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {

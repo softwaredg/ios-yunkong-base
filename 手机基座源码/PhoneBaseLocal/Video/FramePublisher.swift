@@ -37,11 +37,17 @@ final class FramePublisher {
         ]
     }
 
-    /// 内存诊断：视频 client / lane 计数（tryLock，忙则返回 -1）
+    /// 无锁快照，供 mem 日志用（attach/detach 时更新）
+    private var snapClients = 0
+    private var snapLanes = 0
+
     var sessionCounts: (clients: Int, lanes: Int) {
-        guard lock.`try`() else { return (-1, -1) }
-        defer { lock.unlock() }
-        return (clients.count, lanes.count)
+        (snapClients, snapLanes)
+    }
+
+    private func refreshSessionSnapLocked() {
+        snapClients = clients.count
+        snapLanes = lanes.count
     }
 
     private final class Client {
@@ -111,6 +117,7 @@ final class FramePublisher {
         let client = Client(session: session, profile: p)
         clients.append(client)
         let lane = ensureLaneLocked(p)
+        refreshSessionSnapLocked()
         let cfg = lane?.lastConfig
         lock.unlock()
 
@@ -129,6 +136,7 @@ final class FramePublisher {
             self.lock.lock()
             self.clients.removeAll { $0.session === session }
             stopped = self.pruneLanesLocked()
+            self.refreshSessionSnapLocked()
             self.lock.unlock()
             stopped.forEach { $0.encoder.stop() }
         }
@@ -140,6 +148,7 @@ final class FramePublisher {
         clients.removeAll()
         let oldLanes = Array(lanes.values)
         lanes.removeAll()
+        refreshSessionSnapLocked()
         lock.unlock()
         copy.forEach { $0.session.close() }
         oldLanes.forEach { $0.encoder.stop() }
@@ -255,6 +264,7 @@ final class FramePublisher {
         if fresh.isEmpty, let lane = ensureLaneLocked(VideoSettingsStore.shared.defaults) {
             fresh.append(lane)
         }
+        refreshSessionSnapLocked()
         lock.unlock()
         // 先停旧编码器再启新车道，利于 phys_footprint 回落
         old.forEach { $0.encoder.stop() }

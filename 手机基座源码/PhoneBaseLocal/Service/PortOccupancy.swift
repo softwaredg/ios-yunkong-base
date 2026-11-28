@@ -40,7 +40,9 @@ enum PortOccupancy {
                     if isLocalBase(p.name), p.pid != parentPid { return true }
                     return false
                 }
-                return isLocalBase(p.name) || isHelperBinary(p.name) || isConflict(p.name)
+                // 主 UI：清其它主包僵尸与外来冲突；不杀服役中的 PhoneBaseHelper（常驻听口）
+                if isHelperBinary(p.name) { return false }
+                return isLocalBase(p.name) || isConflict(p.name)
             }
             if round == 1 {
                 out.seen = siblings.map { "\($0.name)(\($0.pid))" }

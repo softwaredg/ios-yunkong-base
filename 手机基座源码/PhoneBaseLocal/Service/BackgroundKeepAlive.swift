@@ -6,35 +6,112 @@ final class BackgroundKeepAlive {
     static let shared = BackgroundKeepAlive()
 
     private var player: AVAudioPlayer?
-    private var started = false
+    private var observers: [NSObjectProtocol] = []
+    private var watchTimer: DispatchSourceTimer?
+    private let queue = DispatchQueue(label: "cn.iosmirror.base.keepalive")
 
     func start() {
-        guard !started else { return }
+        queue.async { [weak self] in self?.startLocked(reason: "start") }
+    }
+
+    func stop() {
+        queue.async { [weak self] in self?.stopLocked() }
+    }
+
+    private func startLocked(reason: String) {
+        installObserversIfNeeded()
+        startWatchIfNeeded()
+        if let player, player.isPlaying {
+            return
+        }
+        rebuildPlayer(reason: reason)
+    }
+
+    private func stopLocked() {
+        if let t = watchTimer {
+            t.cancel()
+            watchTimer = nil
+        }
+        for o in observers {
+            NotificationCenter.default.removeObserver(o)
+        }
+        observers.removeAll()
+        player?.stop()
+        player = nil
+        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+    }
+
+    private func rebuildPlayer(reason: String) {
+        player?.stop()
+        player = nil
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try session.setActive(true, options: [])
-            let player = try AVAudioPlayer(data: Self.silentWav)
-            player.numberOfLoops = -1
-            player.volume = 0.01
-            player.prepareToPlay()
-            guard player.play() else {
-                NSLog("[KeepAlive] play failed")
+            let p = try AVAudioPlayer(data: Self.silentWav)
+            p.numberOfLoops = -1
+            p.volume = 0.01
+            p.prepareToPlay()
+            guard p.play() else {
+                NSLog("[KeepAlive] play failed reason=%@", reason)
+                AppRunLog.shared.append("keepalive · play failed · \(reason)")
                 return
             }
-            self.player = player
-            started = true
-            NSLog("[KeepAlive] audio keepalive on")
+            player = p
+            NSLog("[KeepAlive] audio on reason=%@", reason)
+            if reason != "start", reason != "watch-ok" {
+                AppRunLog.shared.append("keepalive · restart · \(reason)")
+            }
         } catch {
             NSLog("[KeepAlive] start error: %@", error.localizedDescription)
+            AppRunLog.shared.append("keepalive · error · \(error.localizedDescription)")
         }
     }
 
-    func stop() {
-        player?.stop()
-        player = nil
-        started = false
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+    private func installObserversIfNeeded() {
+        guard observers.isEmpty else { return }
+        let nc = NotificationCenter.default
+        observers.append(
+            nc.addObserver(
+                forName: AVAudioSession.interruptionNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] note in
+                self?.queue.async {
+                    guard let self else { return }
+                    let type = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                        .flatMap { AVAudioSession.InterruptionType(rawValue: $0) }
+                    if type == .ended {
+                        self.rebuildPlayer(reason: "interruption-ended")
+                    } else if type == .began {
+                        // 打断中：标记需重建；ended 时再开
+                        self.player = nil
+                    }
+                }
+            }
+        )
+        observers.append(
+            nc.addObserver(
+                forName: AVAudioSession.mediaServicesWereResetNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                self?.queue.async { self?.rebuildPlayer(reason: "media-reset") }
+            }
+        )
+    }
+
+    private func startWatchIfNeeded() {
+        if watchTimer != nil { return }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + 60, repeating: 60)
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            if let player = self.player, player.isPlaying { return }
+            self.rebuildPlayer(reason: "watch-not-playing")
+        }
+        t.resume()
+        watchTimer = t
     }
 
     /// 约 0.1s 静音 PCM WAV（44100Hz mono 16-bit）
