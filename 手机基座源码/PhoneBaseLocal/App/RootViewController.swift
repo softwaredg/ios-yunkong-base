@@ -378,8 +378,8 @@ final class RootViewController: UIViewController {
         } else {
             statusDetail.text = "正在启动服务…"
             _ = gateway.start()
-            // Helper 探活可能数秒，回退主进程也要等；分次刷新
-            for delay in [1.5, 4.0, 9.0, 14.0] {
+            // Helper 探活约数秒，失败会主进程兜底；拉长刷新避免一直显示已停止
+            for delay in [1.5, 4.0, 8.0, 12.0, 16.0, 22.0] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                     self?.refreshIP()
                     self?.gateway.refreshStatus {

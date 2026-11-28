@@ -158,7 +158,8 @@ enum HelperLauncher {
         postUpdate: Bool,
         expectVersion: String,
         waitHealthy: Bool,
-        healthyTimeoutSec: TimeInterval = 15,
+        // 默认 8s：UI 点启动不能卡半分钟；失败尽快主进程兜底
+        healthyTimeoutSec: TimeInterval = 8,
         killIfUnhealthy: Bool = true
     ) -> Bool {
         guard let exec = helperPath, FileManager.default.isExecutableFile(atPath: exec)
@@ -175,16 +176,26 @@ enum HelperLauncher {
         for (k, v) in ProcessInfo.processInfo.environment
             where k != ProcessRole.roleKey && k != ProcessRole.parentKey
             && k != ProcessRole.postUpdateKey && k != ProcessRole.expectVerKey
+            && k != ProcessRole.forceServeKey && k != ProcessRole.homeKey
         {
             envList.append("\(k)=\(v)")
         }
         envList.append("\(ProcessRole.roleKey)=helper")
         envList.append("\(ProcessRole.parentKey)=\(getpid())")
+        // 钉死主容器 HOME，避免 Helper 读不到 should-serve / 日志写到别处
+        if let home = ProcessRole.dataHomePath, !home.isEmpty {
+            envList.removeAll { $0.hasPrefix("HOME=") }
+            envList.append("HOME=\(home)")
+            envList.append("\(ProcessRole.homeKey)=\(home)")
+        }
         if postUpdate {
             envList.append("\(ProcessRole.postUpdateKey)=1")
             if !expectVersion.isEmpty {
                 envList.append("\(ProcessRole.expectVerKey)=\(expectVersion)")
             }
+        } else if waitHealthy {
+            // 日常开服：强制 Helper 听口，勿因 flag 路径不一致跳过
+            envList.append("\(ProcessRole.forceServeKey)=1")
         }
         var envp = cStringArray(envList)
         defer { freeCStringArray(envp) }
@@ -278,13 +289,14 @@ enum HelperLauncher {
 
         if waitWindow(timeout) { return true }
 
-        // alive 但口不通：再给一轮，避免 5/15s 一到就 SIGKILL 连杀
+        // alive 但口不通：再给短窗（3s），随后交给主进程兜底，避免卡死在「正在拉起」
         let aliveAfter = kill(pid, 0) == 0
         if aliveAfter, lastReason != "exited", lastReason != "main-holds-port" {
+            let extra: TimeInterval = 3
             AppRunLog.shared.append(
-                "Helper 首轮探活未过 reason=\(lastReason) expect=\(probeExpect.isEmpty ? "any" : probeExpect) → 再等 \(Int(timeout))s"
+                "Helper 首轮探活未过 reason=\(lastReason) expect=\(probeExpect.isEmpty ? "any" : probeExpect) → 再等 \(Int(extra))s"
             )
-            if waitWindow(timeout) { return true }
+            if waitWindow(extra) { return true }
         }
 
         let alive = kill(pid, 0) == 0

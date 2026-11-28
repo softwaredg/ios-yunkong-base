@@ -3,7 +3,7 @@ import Foundation
 /// 主 UI / Helper 共享：用户是否要求开服（停止后 Helper 不拉 UI、可停听口）。
 enum ServeIntent {
     private static func libraryFile(_ name: String) -> URL {
-        if let home = ProcessInfo.processInfo.environment["HOME"], !home.isEmpty {
+        if let home = ProcessRole.dataHomePath {
             return URL(fileURLWithPath: home)
                 .appendingPathComponent("Library", isDirectory: true)
                 .appendingPathComponent(name)
@@ -17,7 +17,9 @@ enum ServeIntent {
     private static var stoppedUrl: URL { libraryFile("phonebase-user-stopped.flag") }
 
     static var shouldServe: Bool {
-        FileManager.default.fileExists(atPath: url.path)
+        // 主进程 spawn 时带 FORCE_SERVE：Helper 不得因 flag 路径不一致而跳过听口
+        if ProcessRole.forceServe { return true }
+        return FileManager.default.fileExists(atPath: url.path)
     }
 
     /// 用户曾点过停止（冷启动勿自动开服）

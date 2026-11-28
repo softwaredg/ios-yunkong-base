@@ -3,8 +3,8 @@ import Foundation
 /// 主 App / Helper 共享的装后标记（同一 App 沙盒）。
 enum UpdateMarker {
     private static var url: URL {
-        // persona/root Helper 与主进程共用：显式走 HOME（spawn 时继承），避免 userDomainMask 漂到 /var/root
-        if let home = ProcessInfo.processInfo.environment["HOME"], !home.isEmpty {
+        // persona/root Helper 与主进程共用：优先 PHONEBASE_HOME / HOME
+        if let home = ProcessRole.dataHomePath {
             return URL(fileURLWithPath: home)
                 .appendingPathComponent("Library", isDirectory: true)
                 .appendingPathComponent("phonebase-post-update.flag")

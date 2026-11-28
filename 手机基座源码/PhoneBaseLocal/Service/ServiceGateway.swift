@@ -14,6 +14,8 @@ final class ServiceGateway {
     private var epoch: UInt64 = 0
     private let lock = NSLock()
     private var handoffWork: DispatchWorkItem?
+    /// 防止连点/冷启动重叠 start 把 epoch 顶掉后无人兜底
+    private var startInFlight = false
 
     var isRunning: Bool {
         lock.lock()
@@ -85,6 +87,15 @@ final class ServiceGateway {
     func start() -> Bool {
         lock.lock()
         userStopped = false
+        if startInFlight {
+            lock.unlock()
+            ServeIntent.set(true)
+            DispatchQueue.main.async { [weak self] in
+                self?.onStatus?("正在拉起 Helper 服务…")
+            }
+            return true
+        }
+        startInFlight = true
         epoch &+= 1
         let myEpoch = epoch
         lock.unlock()
@@ -92,13 +103,22 @@ final class ServiceGateway {
         DispatchQueue.main.async { [weak self] in
             self?.onStatus?("正在启动服务…")
         }
+        let finish: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            self.startInFlight = false
+            self.lock.unlock()
+        }
         if Thread.isMainThread {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 _ = self?.startBlocking(epoch: myEpoch)
+                finish()
             }
             return true
         }
-        return startBlocking(epoch: myEpoch)
+        let ok = startBlocking(epoch: myEpoch)
+        finish()
+        return ok
     }
 
     @discardableResult
@@ -134,8 +154,8 @@ final class ServiceGateway {
 
         // ensure 失败但 Helper 进程仍在：再给短窗，确认死透再兜底
         if !healthy, HelperLauncher.isHelperAlive() {
-            AppRunLog.shared.append("Helper 仍存活，延长探活 8s")
-            let extra = Date().addingTimeInterval(8)
+            AppRunLog.shared.append("Helper 仍存活，延长探活 3s")
+            let extra = Date().addingTimeInterval(3)
             while !healthy && Date() < extra {
                 if isStale(myEpoch) { return false }
                 usleep(300_000)
@@ -157,7 +177,8 @@ final class ServiceGateway {
         if isStale(myEpoch) { return false }
 
         if commitInProcessFallback(epoch: myEpoch) {
-            scheduleHandoffToHelper(delaySec: 5, reason: "after-fallback")
+            // 仅尝试一次交回；失败不重试，避免 Helper 坏时反复停主口
+            scheduleHandoffToHelper(delaySec: 8, reason: "after-fallback")
             return true
         }
 
@@ -312,12 +333,7 @@ final class ServiceGateway {
             usingInProcess = restored
         }
         lock.unlock()
-        if restored {
-            // 稍后还试一次；进后台那次不排队，避免拖死
-            if reason != "enter-background" {
-                scheduleHandoffToHelper(delaySec: 12, reason: "retry-after-fail")
-            }
-        }
+        // 交回失败就留在主进程听口，不再自动重试（否则会卡在「正在拉起 Helper」）
     }
 
     func stop() {

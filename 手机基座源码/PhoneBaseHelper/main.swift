@@ -15,6 +15,10 @@ if getuid() == 0 {
     // RunLoop.main.run() 无源会立刻返回 → 装后 Helper 秒退；dispatchMain 常驻
     dispatchMain()
 } else {
+    AppRunLog.shared.append(
+        "Helper mobile 入口 → UIKit forceServe=\(ProcessRole.forceServe ? 1 : 0) home=\(ProcessRole.dataHomePath ?? "?")"
+    )
+    AppRunLog.shared.flush()
     UIApplicationMain(
         CommandLine.argc,
         CommandLine.unsafeArgv,

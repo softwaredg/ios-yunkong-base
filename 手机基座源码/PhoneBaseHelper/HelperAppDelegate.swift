@@ -29,9 +29,10 @@ final class HelperAppDelegate: UIResponder, UIApplicationDelegate {
             "Helper 进程启动 uid=\(getuid()) marker=\(UpdateMarker.exists ? 1 : 0) postUpdate=\(ProcessRole.postUpdateArmed ? 1 : 0)"
         )
         HelperSupervisor.shared.start()
-        // 用户已停止则只挂 Supervisor，不开服
-        if !ServeIntent.shouldServe, !UpdateMarker.exists {
+        // 用户已停止则只挂 Supervisor，不开服（FORCE_SERVE 时 must listen）
+        if !ServeIntent.shouldServe, !UpdateMarker.exists, !ProcessRole.forceServe {
             AppRunLog.shared.append("Helper 进程启动 · 应开服=0，跳过听口")
+            AppRunLog.shared.flush()
             return true
         }
         // 必须同步开服：posix_spawn 出来的进程 main.async 常迟迟不跑，会出现 alive 但 11019 无响应

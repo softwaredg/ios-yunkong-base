@@ -34,8 +34,8 @@ final class AppRunLog {
     }
 
     private static func sharedLogURL() -> URL? {
-        // 与 ServeIntent 同级 Library，主/Helper 共容器时同一文件
-        if let home = ProcessInfo.processInfo.environment["HOME"], !home.isEmpty {
+        // 与 ServeIntent 同级 Library；优先 PHONEBASE_HOME，避免 Helper 日志写丢
+        if let home = ProcessRole.dataHomePath {
             return URL(fileURLWithPath: home)
                 .appendingPathComponent("Library", isDirectory: true)
                 .appendingPathComponent("phonebase_run.log")
