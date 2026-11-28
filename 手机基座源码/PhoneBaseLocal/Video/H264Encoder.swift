@@ -83,10 +83,10 @@ final class H264Encoder {
         }
     }
 
-    /// 官方 applyBitrateBps：AverageBitRate + DataRateLimits=[bitrate/8, 1]
+    /// AverageBitRate + DataRateLimits。峰值按 2×/1s（勿用 1×：RealTime 会长期吃到一半左右）
     private func applyBitrateLocked(_ sess: VTCompressionSession, bitrateBps: Int) {
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrateBps as CFNumber)
-        let limits: [NSNumber] = [NSNumber(value: bitrateBps / 8), NSNumber(value: 1)]
+        let limits: [NSNumber] = [NSNumber(value: bitrateBps / 4), NSNumber(value: 1)]
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
     }
 
@@ -201,7 +201,6 @@ final class H264Encoder {
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
-        // DataRateLimits=[bitrate/8, 1]：约 1s 窗口峰值 ≈ 平均码率
         applyBitrateLocked(sess, bitrateBps: bitrateBps)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: frameRate as CFNumber)
         // 1s GOP：Interval=fps，Duration=1.0s（避免更长 GOP 的更大 IDR 尖峰）
@@ -223,7 +222,7 @@ final class H264Encoder {
         ready = true
         NSLog(
             "[H264] encoder ready %dx%d br=%d fps=%d gop=1s dataRateLimits=%dB/1s",
-            width, height, bitrateBps, frameRate, bitrateBps / 8
+            width, height, bitrateBps, frameRate, bitrateBps / 4
         )
     }
 
